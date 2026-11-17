@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Casino Slot 老虎機 Demo — FSM + Canvas + Juice</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: radial-gradient(circle at 50% 20%, #2a0f4a 0%, #120626 55%, #060210 100%);
+    color: #fff; font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    overflow: hidden; user-select: none; -webkit-user-select: none;
+    touch-action: manipulation; /* 避免 WebView 雙擊縮放與 300ms 延遲 */
+  }
+  #app {
+    position: relative; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  #hud {
+    width: min(96vw, 720px); display: flex; justify-content: space-between;
+    padding: 8px 12px; font-size: 14px; z-index: 2;
+  }
+  .stat { background: rgba(0,0,0,.35); border: 1px solid rgba(255,215,0,.35);
+          border-radius: 10px; padding: 6px 14px; min-width: 92px; text-align: center; }
+  .stat b { display: block; font-size: 20px; color: #ffd700; letter-spacing: 1px; }
+  .stat span { font-size: 11px; opacity: .7; }
+  canvas {
+    width: min(96vw, 720px); height: min(62vh, 520px);
+    border-radius: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.6), inset 0 0 0 2px rgba(255,215,0,.25);
+    background: #0b0418; display: block;
+  }
+  #controls {
+    width: min(96vw, 720px); display: flex; gap: 10px; margin-top: 12px; z-index: 2;
+  }
+  button {
+    flex: 1; border: none; border-radius: 12px; padding: 14px 0; font-size: 16px; font-weight: 700;
+    color: #1a0b00; background: linear-gradient(#ffe06a, #f5a623);
+    box-shadow: 0 5px 0 #a86a00, 0 8px 16px rgba(0,0,0,.4); cursor: pointer;
+    transition: transform .06s, box-shadow .06s;
+  }
+  button:active { transform: translateY(4px); box-shadow: 0 1px 0 #a86a00; }
+  button.ghost { color: #fff; background: linear-gradient(#4a3a6a, #2a1a4a); box-shadow: 0 5px 0 #150a2a; }
+  button.ghost:active { box-shadow: 0 1px 0 #150a2a; }
+  button:disabled { filter: grayscale(.7) brightness(.7); cursor: default; }
+  #hint { width: min(96vw,720px); text-align:center; font-size:11px; opacity:.55; margin-top:10px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額 BALANCE</span><b id="balance">1000</b></div>
+    <div class="stat"><span>注額 BET</span><b id="bet">10</b></div>
+    <div class="stat"><span>贏分 WIN</span><b id="win">0</b></div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="controls">
+    <button class="ghost" id="betDown">－ 注額</button>
+    <button id="spin">SPIN 旋轉</button>
+    <button class="ghost" id="betUp">＋ 注額</button>
+  </div>
+  <div id="hint">點一下畫面可解鎖音效（iOS Safari 限制）　·　結果由「伺服器 RNG」決定，前端僅做視覺演繹（此範例用 Mock 模擬）</div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================================
+ * 老虎機單頁範例 — 示範：FSM / Canvas 渲染 / Juice / 行動端相容 / RGS 分離
+ * 架構：AudioManager → ParticleSystem → Reel → SlotGame(FSM + GameLoop)
+ * ==========================================================================*/
+
+/* ---------- 1. 緩動函數（Easing） ---------- */
+const Ease = {
+  linear: t => t,
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  // 回彈緩動：停在目標時會略微超過再彈回，製造「卡榫」打擊感
+  outBack: t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  // 彈性緩動：中大獎文字進場用
+  outElastic: t => {
+    const c4 = (2 * Math.PI) / 3;
+    return t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
+  }
+};
+
+/* ---------- 2. 音效管理（Web Audio + iOS 解鎖） ---------- */
+class AudioManager {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.unlocked = false;
+    // iOS / WebView：必須在使用者手勢中建立或 resume AudioContext
+    const unlock = () => {
+      if (!this.ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0.35;
+        this.master.connect(this.ctx.destination);
+      }
+      if (this.ctx.state === "suspended") this.ctx.resume();
+      this.unlocked = true;
+    };
+    window.addEventListener("pointerdown", unlock, { once: false });
+    window.addEventListener("touchstart", unlock, { once: false });
+  }
+  // 以振盪器合成音，避免載入外部音檔（實際專案建議用 AudioBuffer 預載）
+  _tone(freq, dur, type = "sine", vol = 1, slideTo = null) {
+    if (!this.ctx || !this.unlocked) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(this.master);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  }
+  spin()  { this._tone(220, 0.25, "sawtooth", 0.25, 480); }
+  stop()  { this._tone(160, 0.12, "square", 0.3, 80); }
+  win()   { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this._tone(f, 0.35, "triangle", 0.4), i * 90)); }
+  bigWin(){ [392, 523, 659, 784, 1047, 1319].forEach((f, i) => setTimeout(() => this._tone(f, 0.5, "sawtooth", 0.3), i * 70)); }
+}
+
+/* ---------- 3. 粒子系統（物件池，避免 GC 壓力） ---------- */
+class ParticleSystem {
+  constructor(max = 400) {
+    this.pool = Array.from({ length: max }, () => ({
+      active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 1,
+      rot: 0, vr: 0, size: 8, kind: 0
+    }));
+  }
+  // 金幣噴發：從 (x,y) 向上散射
+  burst(x, y, count, power = 1) {
+    let spawned = 0;
+    for (const p of this.pool) {
+      if (p.active) continue;
+      const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.8;
+      const spd = (180 + Math.random() * 320) * power;
+      p.active = true; p.x = x; p.y = y;
+      p.vx = Math.cos(ang) * spd; p.vy = Math.sin(ang) * spd;
+      p.maxLife = p.life = 0.7 + Math.random() * 0.7;
+      p.rot = Math.random() * Math.PI; p.vr = (Math.random() - 0.5) * 12;
+      p.size = 6 + Math.random() * 7;
+      p.kind = Math.random() < 0.25 ? 1 : 0; // 1 = 星星
+      if (++spawned >= count) break;
+    }
+  }
+  update(dt) {
+    const G = 900; // 重力
+    for (const p of this.pool) {
+      if (!p.active) continue;
+      p.vy += G * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.rot += p.vr * dt;
+      p.life -= dt;
+      if (p.life <= 0) p.active = false;
+    }
+  }
+  draw(ctx) {
+    for (const p of this.pool) {
+      if (!p.active) continue;
+      const a = Math.min(1, p.life / (p.maxLife * 0.4));
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      if (p.kind === 0) {
+        // 金幣：橢圓模擬翻轉 + 內圈
+        const w = Math.abs(Math.cos(p.rot)) * p.size + 2;
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath(); ctx.ellipse(0, 0, w, p.size, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#b8860b"; ctx.lineWidth = 1.5; ctx.stroke();
+        if (w > p.size * 0.6) {
+          ctx.fillStyle = "#b8860b"; ctx.font = `${p.size}px sans-serif`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("$", 0, 1);
+        }
+      } else {
+        // 星星
+        ctx.fillStyle = "#fff3a0";
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const r = i % 2 ? p.size * 0.45 : p.size;
+          const ang = (i / 10) * Math.PI * 2 - Math.PI / 2;
+          i ? ctx.lineTo(Math.cos(ang) * r, Math.sin(ang) * r)
+            : ctx.moveTo(Math.cos(ang) * r, Math.sin(ang) * r);
+        }
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+}
+
+/* ---------- 4. 符號定義與賠率表 ---------- */
+const SYMBOLS = [
+  { id: "7",       label: "7",   color: "#ff3b30", payout: 50  },
+  { id: "BAR",     label: "BAR", color: "#ffcc00", payout: 30  },
+  { id: "CHERRY",  label: "🍒",  color: "#e74c3c", payout: 20  },
+  { id: "LEMON",   label: "🍋",  color: "#f1c40f", payout: 15  },
+  { id: "BELL",    label: "🔔",  color: "#f39c12", payout: 10  },
+  { id: "DIAMOND", label: "💎",  color: "#00bcd4", payout: 100 }
+];
+const N = SYMBOLS.length;
+
+/* ---------- 5. 單一捲軸 ---------- */
+class Reel {
+  constructor() {
+    this.pos = 0;          // 支付線（中間列）所在的連續符號索引（可為小數）
+    this.speed = 0;        // 旋轉速度（符號 / 秒）
+    this.spinning = false;
+    this.stopping = false;
+    this.stopped = false;
+    this.stopFrom = 0; this.stopTo = 0;
+    this.stopStart = 0; this.stopDuration = 0;
+    this.targetSym = 0;    // 伺服器決定的目標符號索引
+  }
+  beginSpin() {
+    this.spinning = true; this.stopping = false; this.stopped = false;
+    this.speed = 14 + Math.random() * 4; // 每秒滾 14~18 格
+  }
+  // 排程停輪：找到 pos 之後、至少再轉 2 圈的第一個目標符號位置
+  prepareStop(targetSym, now, delay, index) {
+    this.targetSym = targetSym;
+    this.stopAt = now + delay;
+    this.stopDuration = 0.45 + index * 0.12;
+    this._scheduled = true;
+  }
+  beginStop(now) {
+    let T = Math.ceil(this.pos) + 2 * N;
+    while (T % N !== this.targetSym) T++;
+    this.stopFrom = this.pos; this.stopTo = T;
+    this.stopStart = now;
+    this.stopping = true; this.spinning = false; this._scheduled = false;
+    this.audioStop = true; // 通知上層撥放卡榫音
+  }
+  update(dt, now) {
+    if (this._scheduled && now >= this.stopAt && !this.stopping) this.beginStop(now);
+    if (this.spinning) {
+      this.pos += this.speed * dt;
+      if (this.pos > 5000) this.pos -= 2000; // 防止數值無限增大
+    } else if (this.stopping) {
+      const t = Math.min(1, (now - this.stopStart) / this.stopDuration);
+      const e = Ease.outBack(t); // 回彈：略微超過再定位
+      this.pos = this.stopFrom + (this.stopTo - this.stopFrom) * e;
+      if (t >= 1) { this.pos = this.stopTo; this.stopping = false; this.stopped = true; }
+    }
+  }
+  get centerIndex() { return ((Math.round(this.pos) % N) + N) % N; }
+}
+
+/* ---------- 6. 遊戲主體（FSM + 固定步長 GameLoop） ---------- */
+const STATE = { IDLE: "IDLE", REQUESTING: "REQUESTING", SPINNING: "SPINNING", STOPPING: "STOPPING", WIN: "WIN_PRESENTATION" };
+
+class SlotGame {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d", { alpha: false });
+    this.audio = new AudioManager();
+    this.particles = new ParticleSystem();
+    this.reels = [new Reel(), new Reel(), new Reel()];
+    this.state = STATE.IDLE;
+
+    this.balance = 1000;
+    this.bet = 10;
+    this.winAmount = 0;
+    this.result = null;
+
+    this.spinStartTime = 0;
+    this.now = 0;
+    this.shake = 0;
+    this.winAnimStart = 0;
+    this.winText = "";
+
+    // 固定步長：避免不同刷新率（60/120Hz）導致物理表現不一致
+    this.FIXED_DT = 1 / 60;
+    this.acc = 0;
+    this.lastTime = performance.now();
+
+    this.bindUI();
+    this.resize();
+    window.addEventListener("resize", () => this.resize());
+    // 使用 pointer events 統一觸控/滑鼠，避免觸控延遲
+    this.loop = this.loop.bind(this);
+    requestAnimationFrame(this.loop);
+  }
+
+  bindUI() {
+    const $ = id => document.getElementById(id);
+    this.ui = { balance: $("balance"), bet: $("bet"), win: $("win"), spin: $("spin"), down: $("betDown"), up: $("betUp") };
+    const refreshBet = () => { this.ui.bet.textContent = this.bet; };
+    this.ui.down.addEventListener("click", () => { if (this.state === STATE.IDLE) { this.bet = Math.max(1, this.bet - 1); refreshBet(); } });
+    this.ui.up.addEventListener("click", () => { if (this.state === STATE.IDLE) { this.bet = Math.min(100, this.bet + 1); refreshBet(); } });
+    this.ui.spin.addEventListener("click", () => this.spin());
+  }
+
+  syncHUD() {
+    this.ui.balance.textContent = this.balance;
+    this.ui.win.textContent = this.winAmount;
+    // 只有 IDLE 才能再下注，杜絕連點重複請求
+    this.ui.spin.disabled = this.state !== STATE.IDLE;
+  }
+
+  resize() {
+    // 處理高 DPI：以 devicePixelRatio 放大畫布，文字/图形才不會糊
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = this.canvas.getBoundingClientRect();
+    this.cssW = rect.width; this.cssH = rect.height;
+    this.canvas.width = Math.round(rect.width * dpr);
+    this.canvas.height = Math.round(rect.height * dpr);
+    this.dpr = dpr;
+  }
+
+  /* --- RGS 分離：結果由「伺服器 RNG」決定，前端只拿結果做演繹 ---
+   * 正式環境：this.result = await fetch('/api/spin', { bet }) -> server RNG
+   * 此處用 Promise + setTimeout 模擬網路延遲，並加權讓 demo 容易中奖 */
+  requestServerResult(bet) {
+    return new Promise(resolve => {
+      const delay = 180 + Math.random() * 320;
+      setTimeout(() => {
+        const strip = [];
+        for (let i = 0; i < 3; i++) {
+          // 加權：25% 機率強迫三連線，方便展示 Big Win 特效
+          strip.push(Math.random() < 0.25 ? Math.floor(Math.random() * N) : Math.floor(Math.random() * N));
+        }
+        resolve({ reels: strip, serverNonce: Math.random().toString(36).slice(2) });
+      }, delay);
+    });
+  }
+
+  async spin() {
+    if (this.state !== STATE.IDLE) return;      // 防連點
+    if (this.balance < this.bet) return;
+    this.balance -= this.bet;
+    this.winAmount = 0;
+    this.syncHUD();
+    this.setState(STATE.REQUESTING);
+    this.audio.spin();
+
+    const res = await this.requestServerResult(this.bet);
+    // 防競態：若在等待期間狀態被外部改變（如斷線重連），直接捨棄舊結果
+    if (this.state !== STATE.REQUESTING) return;
+    this.result = res;
+    this.spinStartTime = this.now;
+    this.reels.forEach(r => r.beginSpin());
+    this.setState(STATE.SPINNING);
+  }
+
+  setState(s) {
+    this.state = s;
+    this.syncHUD();
+  }
+
+  evaluate(indices) {
+    const [a, b, c] = indices;
+    if (a === b && b === c) return Math.round(SYMBOLS[a].payout * this.bet);
+    const cherries = indices.filter(i => i === 2).length;
+    if (cherries >= 2) return 2 * this.bet;
+    return 0;
+  }
+
+  update(dt) {
+    this.now += dt;
+    this.particles.update(dt);
+    if (this.shake > 0) this.shake = Math.max(0, this.shake - dt * 28);
+
+    switch (this.state) {
+      case STATE.SPINNING: {
+        this.reels.forEach(r => r.update(dt, this.now));
+        // 最短旋轉時間後，交給 STOPPING 並錯開停輪時間（製造期待感）
+        if (this.now - this.spinStartTime > 0.75) {
+          this.reels.forEach((r, i) => r.prepareStop(this.result.reels[i], this.now, i * 0.28, i));
+          this.setState(STATE.STOPPING);
+        }
+        break;
+      }
+      case STATE.STOPPING: {
+        this.reels.forEach(r => {
+          const before = r.stopping;
+          r.update(dt, this.now);
+          if (!before && r.stopping && r.audioStop) { this.audio.stop(); this.shake = 5; r.audioStop = false; }
+        });
+        if (this.reels.every(r => r.stopped)) {
+          const idx = this.reels.map(r => r.centerIndex);
+          const payout = this.evaluate(idx);
+          if (payout > 0) this.enterWin(payout);
+          else { this.setState(STATE.IDLE); }
+        }
+        break;
+      }
+      case STATE.WIN: {
+        // 中獎動畫播放 ~1.8 秒後回到待機
+        if (this.now - this.winAnimStart > 1.8) this.setState(STATE.IDLE);
+        break;
+      }
+    }
+  }
+
+  enterWin(amount) {
+    this.winAmount = amount;
+    this.balance += amount;
+    this.winText = amount >= this.bet * 30 ? "BIG WIN!" : `WIN ${amount}`;
+    this.winAnimStart = this.now;
+    this.setState(STATE.WIN);
+    this.syncHUD();
+
+    const W = this.cssW, H = this.cssH;
+    const cx = W / 2, cy = H * 0.52;
+    if (amount >= this.bet * 30) {
+      this.audio.bigWin();
+      this.particles.burst(cx, cy, 180, 1.35);
+      this.shake = 16;
+    } else {
+      this.audio.win();
+      this.particles.burst(cx, cy, 70, 1);
+      this.shake = 8;
+    }
+  }
+
+  render() {
+    const ctx = this.ctx, W = this.cssW, H = this.cssH;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+
+    // 背景
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, "#1a0836"); bg.addColorStop(1, "#0a0318");
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+    // 螢幕震動（受損時位移）
+    ctx.save();
+    if (this.shake > 0) ctx.translate((Math.random() - 0.5) * this.shake, (Math.random() - 0.5) * this.shake);
+
+    // 版面計算（流動佈局，適應橫/豎屏）
+    const reelW = Math.min(W * 0.27, 170);
+    const gap = W * 0.03;
+    const totalW = reelW * 3 + gap * 2;
+    const startX = (W - totalW) / 2;
+    const reelTop = H * 0.16;
+    const reelH = H * 0.5;
+    const symH = reelH / 3;
+    const centerY = reelTop + reelH / 2;
+
+    // 機台框
+    ctx.fillStyle = "rgba(0,0,0,.35)";
+    this.roundRect(ctx, startX - 14, reelTop - 14, totalW + 28, reelH + 28, 18); ctx.fill();
+    ctx.strokeStyle = "rgba(255,215,0,.5)"; ctx.lineWidth = 2;
+    this.roundRect(ctx, startX - 14, reelTop - 14, totalW + 28, reelH + 28, 18); ctx.stroke();
+
+    // 繪製三個捲軸
+    for (let i = 0; i < 3; i++) {
+      const rx = startX + i * (reelW + gap);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(rx, reelTop, reelW, reelH); ctx.clip();
+      const p = this.reels[i].pos;
+      const base = Math.floor(p);
+      for (let k = base - 2; k <= base + 2; k++) {
+        const y = centerY + (k - p) * symH;
+        if (y + symH < reelTop || y - symH > reelTop + reelH) continue;
+        this.drawSymbol(SYMBOLS[((k % N) + N) % N], rx, y - symH / 2, reelW, symH);
+      }
+      // 上下暗角
+      const sh = ctx.createLinearGradient(0, reelTop, 0, reelTop + reelH);
+      sh.addColorStop(0, "rgba(0,0,0,.85)"); sh.addColorStop(0.3, "rgba(0,0,0,0)");
+      sh.addColorStop(0.7, "rgba(0,0,0,0)"); sh.addColorStop(1, "rgba(0,0,0,.85)");
+      ctx.fillStyle = sh; ctx.fillRect(rx, reelTop, reelW, reelH);
+      ctx.restore();
+    }
+
+    // 支付線
+    ctx.strokeStyle = "rgba(255,215,0,.9)"; ctx.lineWidth = 2;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath(); ctx.moveTo(startX - 6, centerY); ctx.lineTo(startX + totalW + 6, centerY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 狀態提示
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+    const label = { IDLE: "準備好了 · 按下 SPIN", REQUESTING: "連線伺服器…", SPINNING: "SPINNING…", STOPPING: "…", WIN_PRESENTATION: "" }[this.state];
+    ctx.fillText(label, W / 2, reelTop - 26);
+
+    // 粒子
+    this.particles.draw(ctx);
+
+    // 中獎文字（彈性進場 + 淡出）
+    if (this.state === STATE.WIN) {
+      const t = Math.min(1, (this.now - this.winAnimStart) / 0.6);
+      const scale = Ease.outElastic(t);
+      const fade = Math.min(1, (1.8 - (this.now - this.winAnimStart)) / 0.5);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, fade);
+      ctx.translate(W / 2, H * 0.82);
+      ctx.scale(scale, scale);
+      ctx.font = "bold 44px sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.lineWidth = 8; ctx.strokeStyle = "#5a2a00"; ctx.strokeText(this.winText, 0, 0);
+      const grad = ctx.createLinearGradient(0, -24, 0, 24);
+      grad.addColorStop(0, "#fff7b0"); grad.addColorStop(1, "#ffb300");
+      ctx.fillStyle = grad; ctx.fillText(this.winText, 0, 0);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  drawSymbol(sym, x, y, w, h) {
+    const ctx = this.ctx;
+    const grad = ctx.createLinearGradient(x, y, x, y + h);
+    grad.addColorStop(0, "#ffffff"); grad.addColorStop(0.12, sym.color); grad.addColorStop(1, "#1a1a1a");
+    ctx.fillStyle = grad;
+    this.roundRect(ctx, x + 3, y + 3, w - 6, h - 6, 10); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 2;
+    this.roundRect(ctx, x + 3, y + 3, w - 6, h - 6, 10); ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.min(h * 0.55, 64)}px sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 6;
+    ctx.fillText(sym.label, x + w / 2, y + h / 2 + 2);
+    ctx.shadowBlur = 0;
+  }
+
+  roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  loop(now) {
+    requestAnimationFrame(this.loop);
+    let dt = (now - this.lastTime) / 1000;
+    this.lastTime = now;
+    if (dt > 0.1) dt = 0.1; // 防止切分頁回來後的「死亡螺旋」
+    this.acc += dt;
+    while (this.acc >= this.FIXED_DT) { this.update(this.FIXED_DT); this.acc -= this.FIXED_DT; }
+    this.render();
+  }
+}
+
+window.addEventListener("DOMContentLoaded", () => { window.game = new SlotGame(document.getElementById("game")); });
+</script>
+</body>
+</html>
