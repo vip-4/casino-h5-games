@@ -1,0 +1,18 @@
+{
+  "name": "casino-rgs-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Casino H5 RGS 後端範例：roundId 冪等 / 伺服器 RNG / Provably Fair / SQLite 帳本",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
