@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>引擎骨架 Demo — GameLoop / FSM / Audio / Particle</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#070c16;color:#fff;font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:8px}
+  #hud,#ctrl{width:min(94vw,880px);display:flex;gap:8px;flex-wrap:wrap}
+  .stat{flex:1;min-width:90px;background:rgba(255,255,255,.05);border:1px solid rgba(120,200,255,.25);border-radius:9px;padding:6px;text-align:center}
+  .stat b{display:block;font-size:18px;color:#7ef0ff}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(94vw,880px);aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.6)}
+  #stage canvas{width:100%;height:100%;display:block;cursor:crosshair}
+  #ctrl button{border:none;border-radius:8px;padding:10px;font-weight:700;font-size:13px;color:#fff;
+    background:linear-gradient(#3a7fbf,#15507f);box-shadow:0 3px 0 #0a3050;cursor:pointer;flex:1;min-width:80px}
+  button:active{transform:translateY(2px)}button:disabled{filter:grayscale(.7) brightness(.6)}
+  #hint{font-size:11px;opacity:.55;text-align:center;max-width:880px;line-height:1.6}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="共用 H5 遊戲引擎骨架：固定步長 GameLoop、有限狀態機、Web Audio 解鎖、粒子系統與物件池，可直接複用。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/engine-demo.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/engine-demo.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/engine-demo.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="引擎骨架 Demo — GameLoop / FSM / Audio / Particle">
+<meta property="og:description" content="共用 H5 遊戲引擎骨架：固定步長 GameLoop、有限狀態機、Web Audio 解鎖、粒子系統與物件池，可直接複用。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/engine-demo.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="引擎骨架 Demo — GameLoop / FSM / Audio / Particle">
+<meta name="twitter:description" content="共用 H5 遊戲引擎骨架：固定步長 GameLoop、有限狀態機、Web Audio 解鎖、粒子系統與物件池，可直接複用。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>FSM 狀態</span><b id="st">IDLE</b></div>
+    <div class="stat"><span>FPS</span><b id="fps">0</b></div>
+    <div class="stat"><span>活躍粒子</span><b id="pc">0</b></div>
+    <div class="stat"><span>球座標</span><b id="pos">—</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <button id="start">START（IDLE→RUNNING）</button>
+    <button id="boom" disabled>BOOM（RUNNING→BOOM）</button>
+    <button id="reset">RESET</button>
+  </div>
+  <div id="hint">點擊畫面：在該處噴發粒子並播放音效　·　所有模組來自 engine.js（GameLoop 固定步長、FSM 非法轉換攔截、Audio 手勢解鎖、Particle 物件池、Stage DPR/RWD）</div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function(){
+  const {Ease,ObjectPool,FSM,AudioManager,ParticleSystem,GameLoop,Stage}=Engine;
+  const $=id=>document.getElementById(id);
+
+  const stage=new Stage($("game"));
+  const particles=new ParticleSystem(stage.ctx,500);
+  const audio=new AudioManager(.3)
+    .define("click",{freq:700,dur:.08,type:"square",vol:.15})
+    .define("start",{freq:400,dur:.2,type:"triangle",vol:.2,to:800})
+    .define("boom",{seq:[180,140,100,70],dur:.35,type:"sawtooth",vol:.25,gap:60});
+
+  const fsm=new FSM("IDLE",{
+    IDLE:["RUNNING"],RUNNING:["BOOM","IDLE"],BOOM:["IDLE"]
+  },(prev,next)=>{
+    $("st").textContent=next;
+    $("start").disabled=next!=="IDLE";
+    $("boom").disabled=next!=="RUNNING";
+  });
+
+  // 球：用物件池示範（單一物件也走池，模式一致）
+  const balls=new ObjectPool(1,()=>({active:false,x:0,y:0,vx:0,vy:0,r:18}));
+  function spawnBall(){
+    const b=balls.acquire();if(!b)return;
+    b.x=stage.w*.5;b.y=stage.h*.4;b.vx=160;b.vy=130;
+  }
+  spawnBall();
+
+  let boomT=0;
+  const loop=new GameLoop({
+    update(dt){
+      balls.forEach(b=>{
+        if(fsm.is("RUNNING")){
+          b.vy+=520*dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+          if(b.y>stage.h-b.r){b.y=stage.h-b.r;b.vy=-Math.abs(b.vy)*.88;}
+          if(b.x>stage.w-b.r){b.x=stage.w-b.r;b.vx=-Math.abs(b.vx);}
+          if(b.x<b.r){b.x=b.r;b.vx=Math.abs(b.vx);}
+        }
+      });
+      if(fsm.is("BOOM")){
+        boomT+=dt;
+        if(boomT>.9){boomT=0;fsm.set("IDLE");spawnBall();}
+      }
+      particles.update(dt);
+    },
+    render(){
+      const c=stage.begin();
+      const g=c.createLinearGradient(0,0,0,stage.h);g.addColorStop(0,"#101a30");g.addColorStop(1,"#050a14");
+      c.fillStyle=g;c.fillRect(0,0,stage.w,stage.h);
+      c.strokeStyle="rgba(120,200,255,.1)";
+      for(let x=0;x<stage.w;x+=40){c.beginPath();c.moveTo(x,0);c.lineTo(x,stage.h);c.stroke();}
+      for(let y=0;y<stage.h;y+=40){c.beginPath();c.moveTo(0,y);c.lineTo(stage.w,y);c.stroke();}
+      balls.forEach(b=>{
+        c.save();c.translate(b.x,b.y);
+        c.fillStyle="#7ef0ff";c.shadowColor="#7ef0ff";c.shadowBlur=20;
+        c.beginPath();c.arc(0,0,b.r,0,6.283);c.fill();c.restore();
+      });
+      particles.draw();
+      $("fps").textContent=loop.fps;
+      $("pc").textContent=particles.count;
+      balls.forEach(b=>$("pos").textContent=Math.round(b.x)+", "+Math.round(b.y));
+    }
+  });
+
+  $("start").onclick=()=>{if(fsm.set("RUNNING"))audio.play("start");};
+  $("boom").onclick=()=>{
+    if(!fsm.set("BOOM"))return;
+    audio.play("boom");
+    balls.forEach(b=>particles.burst(b.x,b.y,180,{colors:["#ffe06a","#7ef0ff","#ff5b8a"],power:1.5,life:1.1,shape:1}));
+  };
+  $("reset").onclick=()=>{fsm.reset("IDLE");balls.releaseAll();spawnBall();particles.clear();};
+  $("game").addEventListener("pointerdown",e=>{
+    const r=e.currentTarget.getBoundingClientRect();
+    const x=(e.clientX-r.left)*(stage.w/r.width),y=(e.clientY-r.top)*(stage.h/r.height);
+    particles.burst(x,y,60,{colors:["#ffe06a","#7ef0ff"],power:.9,life:.7});
+    audio.play("click");
+  });
+
+  loop.start();
+})();
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"引擎骨架 Demo — GameLoop / FSM / Audio / Particle","description":"共用 H5 遊戲引擎骨架：固定步長 GameLoop、有限狀態機、Web Audio 解鎖、粒子系統與物件池，可直接複用。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/engine-demo.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
