@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casino H5 遊戲 lab｜老虎機、捕魚機、百家樂、輪盤、Crash 完整原始碼範例</title>
+<meta name="description" content="Casino H5 Games Lab 提供十個可直接執行的博弈遊戲前端範例：Canvas 與 PixiJS 老虎機、捕魚機、百家樂、輪盤、Crash 崩盤，並附共用引擎、RGS 串接規格與 Provably Fair 說明。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化,SEO,GEO">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
+<meta name="author" content="Casino H5 Games Lab">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/">
+<link rel="alternate" hreflang="zh-Hant-TW" href="https://casino-h5-games.pages.dev/">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="Casino H5 遊戲 lab｜老虎機、捕魚機、百家樂、輪盤、Crash 完整原始碼範例">
+<meta property="og:description" content="十個可直接執行的 H5 博弈遊戲範例，涵蓋 Canvas 2D、PixiJS WebGL、共用引擎與 RGS 前後端分離架構。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta property="og:image:alt" content="Casino H5 Games Lab 遊戲範例首頁示意圖">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Casino H5 遊戲 lab｜完整原始碼範例">
+<meta name="twitter:description" content="Canvas、PixiJS、FSM、RGS 與 Provably Fair 的 H5 博弈遊戲實作範例。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:label1" content="遊戲範例數">
+<meta name="twitter:data1" content="10">
+<meta name="twitter:label2" content="技術涵蓋">
+<meta name="twitter:data2" content="Canvas / WebGL / RGS">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://casino-h5-games.pages.dev/#website",
+      "url": "https://casino-h5-games.pages.dev/",
+      "name": "Casino H5 Games Lab",
+      "description": "H5 博弈遊戲前端範例與技術文件：老虎機、捕魚機、百家樂、輪盤、Crash 崩盤，含共用引擎與 RGS 串接規格。",
+      "inLanguage": "zh-Hant",
+      "datePublished": "2026-11-18",
+      "dateModified": "2026-11-18"
+    },
+    {
+      "@type": "ItemList",
+      "@id": "https://casino-h5-games.pages.dev/#games",
+      "name": "H5 博弈遊戲範例清單",
+      "itemListOrder": "https://schema.org/ItemListOrderAscending",
+      "numberOfItems": 10,
+      "itemListElement": [
+        {"@type":"ListItem","position":1,"name":"Canvas 老虎機","url":"https://casino-h5-games.pages.dev/slot-machine-demo.html"},
+        {"@type":"ListItem","position":2,"name":"PixiJS WebGL 老虎機","url":"https://casino-h5-games.pages.dev/slot-pixi-demo.html"},
+        {"@type":"ListItem","position":3,"name":"捕魚機","url":"https://casino-h5-games.pages.dev/fish-game-demo.html"},
+        {"@type":"ListItem","position":4,"name":"百家樂","url":"https://casino-h5-games.pages.dev/baccarat-demo.html"},
+        {"@type":"ListItem","position":5,"name":"輪盤","url":"https://casino-h5-games.pages.dev/roulette-demo.html"},
+        {"@type":"ListItem","position":6,"name":"Crash 崩盤","url":"https://casino-h5-games.pages.dev/crash-demo.html"},
+        {"@type":"ListItem","position":7,"name":"Crash + RGS","url":"https://casino-h5-games.pages.dev/crash-rgs-demo.html"},
+        {"@type":"ListItem","position":8,"name":"共用引擎骨架","url":"https://casino-h5-games.pages.dev/engine-demo.html"},
+        {"@type":"ListItem","position":9,"name":"RGS 前端 Adapter","url":"https://casino-h5-games.pages.dev/rgs-client-demo.html"},
+        {"@type":"ListItem","position":10,"name":"RGS HTTP Client","url":"https://casino-h5-games.pages.dev/rgs-client-http.html"}
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://casino-h5-games.pages.dev/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "什麼是 H5 博弈遊戲？",
+          "acceptedAnswer": {"@type":"Answer","text":"H5 博弈遊戲是以 HTML5、JavaScript 與 Canvas 或 WebGL 開發、可直接在瀏覽器執行的博弈類遊戲，例如老虎機、捕魚機、百家樂、輪盤與 Crash。它不需要安裝 App，並可同時适配桌面與行動裝置。"}
+        },
+        {
+          "@type": "Question",
+          "name": "如何確保線上老虎機結果公平？",
+          "acceptedAnswer": {"@type":"Answer","text":"公平性依靠三件事：結果由伺服器 RNG 決定而非前端；開局前公開 serverSeedHash、结束後揭露 serverSeed 供玩家重算驗證（Provably Fair）；所有下注與結果寫入不可竄改帳本。前端只負責視覺演繹。"}
+        },
+        {
+          "@type": "Question",
+          "name": "什麼是 RGS？",
+          "acceptedAnswer": {"@type":"Answer","text":"RGS（Remote Gaming Server，遠端遊戲伺服器）是博弈遊戲的後端服務，負責玩家餘額、下注、隨機結果、結算與紀錄。前端透過 roundId 冪等鍵呼叫 RGS，即使斷線重連也能查回同一局結果。"}
+        },
+        {
+          "@type": "Question",
+          "name": "如何在行動端維持 60 FPS？",
+          "acceptedAnswer": {"@type":"Answer","text":"關鍵做法包括：使用固定步長 GameLoop；用物件池重用精靈與粒子以避免垃圾回收抖動；以 Sprite Atlas 合併繪製呼叫；限制 devicePixelRatio 上限；在分頁隱藏時暫停渲染；並用 touch-action 與 pointer events 消除觸控延遲。"}
+        },
+        {
+          "@type": "Question",
+          "name": "iOS Safari 的音訊要如何解鎖？",
+          "acceptedAnswer": {"@type":"Answer","text":"AudioContext 必須在使用者手勢（pointerdown 或 touchstart）中建立或呼叫 resume()，否則會保持 suspended 狀態而沒有聲音。本站的引擎已內建解鎖邏輯。"}
+        }
+      ]
+    }
+  ]
+}
+</script>
+
+<style>
+:root{color-scheme:dark;--bg:#07040f;--panel:#120a22;--line:rgba(255,215,0,.25);--gold:#ffd700;--cyan:#7ef0ff;--text:#eee9f5;--muted:#a9a2bb}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:radial-gradient(circle at 50% 0%,#1d0e38,#07040f 55%,#030209);color:var(--text);
+ font-family:system-ui,-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;line-height:1.75}
+a{color:var(--cyan)}
+a:focus-visible,button:focus-visible{outline:3px solid var(--gold);outline-offset:3px}
+.skip{position:absolute;left:-9999px;top:0;background:#fff;color:#000;padding:10px 16px;z-index:99}
+.skip:focus{left:8px;top:8px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+header.site{border-bottom:1px solid var(--line);background:rgba(7,4,15,.85);position:sticky;top:0;z-index:10;backdrop-filter:blur(8px)}
+header.site .wrap{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding-top:12px;padding-bottom:12px}
+.brand{font-weight:800;font-size:20px;color:var(--gold);text-decoration:none;letter-spacing:.5px}
+nav ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:16px}
+nav a{text-decoration:none;color:var(--muted);font-size:14px}
+nav a:hover{color:var(--gold)}
+main{padding:34px 0 60px}
+.hero h1{font-size:clamp(28px,5vw,46px);line-height:1.25;margin:0 0 14px}
+.hero h1 span{color:var(--gold)}
+.lead{font-size:clamp(16px,2.2vw,19px);color:#d8d2e6;max-width:760px}
+.badges{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0;padding:0;list-style:none}
+.badges li{font-size:12px;padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:rgba(255,215,0,.06)}
+section{margin-top:46px}
+h2{font-size:clamp(22px,3.4vw,30px);border-left:5px solid var(--gold);padding-left:12px;margin:0 0 12px}
+h3{font-size:18px;margin:0 0 6px;color:#fff}
+p{margin:0 0 12px}
+.note{color:var(--muted);font-size:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:18px}
+article.card{background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:8px}
+article.card p{color:var(--muted);font-size:14px;flex:1}
+article.card a.more{font-weight:700;text-decoration:none;color:var(--gold)}
+.tag{font-size:11px;color:var(--cyan);letter-spacing:.5px}
+.faq item{display:block;border-bottom:1px solid rgba(255,255,255,.1);padding:14px 0}
+.faq h3{color:var(--gold);font-size:16px}
+.faq p{color:#d8d2e6}
+footer.site{border-top:1px solid var(--line);padding:22px 0 34px;color:var(--muted);font-size:13px}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media (max-width:640px){nav ul{gap:10px}.hero h1{font-size:30px}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳至主要內容</a>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="Casino H5 Games Lab 首頁">Casino H5 Games Lab</a>
+    <nav aria-label="主要導覽">
+      <ul>
+        <li><a href="#games">遊戲範例</a></li>
+        <li><a href="#tech">技術架構</a></li>
+        <li><a href="#faq">常見問題</a></li>
+        <li><a href="rgs-integration.md">RGS 規格</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <section class="hero" aria-labelledby="hero-title">
+    <h1 id="hero-title">十個可執行的 <span>Casino H5 遊戲</span>原始碼範例</h1>
+    <p class="lead">本站整理老虎機、捕魚機、百家樂、輪盤與 Crash 崩盤等 H5 博弈遊戲的前端實作，示範 Canvas 2D 與 PixiJS WebGL 渲染、有限狀態機、粒子特效、Web Audio 音效，以及前後端分離的 RGS 串接。每個範例都是單頁檔案，可直接複製執行。</p>
+    <ul class="badges" aria-label="技術標籤">
+      <li>HTML5 Canvas 2D</li><li>PixiJS v8 WebGL</li><li>FSM 狀態機</li>
+      <li>物件池 / 60 FPS</li><li>Provably Fair</li><li>RGS roundId 冪等</li>
+    </ul>
+    <p class="note">更新日期：2026-11-18　·　所有範例皆為技術展示，结果由伺服器 RNG 決定，前端僅做視覺演繹。</p>
+  </section>
+
+  <section id="games" aria-labelledby="games-title">
+    <h2 id="games-title">遊戲與工具範例</h2>
+    <p class="note">依據用途分為三類：完整遊戲、共用引擎、RGS 串接。點擊卡片可開啟可直接運行的單頁範例。</p>
+    <div class="grid">
+      <article class="card"><span class="tag">CANVAS 2D</span><h3>Canvas 老虎機</h3><p>三軸捲軸、緩動停輪、金幣粒子與 Web Audio 音效，展示完整 FSM 與行動端相容做法。</p><a class="more" href="slot-machine-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">WEBGL</span><h3>PixiJS 老虎機</h3><p>以 PixiJS v8 重構，使用執行期 Sprite Atlas、自訂 Glow Filter 與 Blur Bloom 發光效果。</p><a class="more" href="slot-pixi-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">物件池</span><h3>捕魚機</h3><p>70 隻魚與 160 發子彈的物件池、圓形碰撞、1x 至 10x 炮台倍率與 BOSS 血條。</p><a class="more" href="fish-game-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">牌桌遊戲</span><h3>百家樂</h3><p>8 副牌、標準補牌規則、發牌動畫與 FSM 生命週期，閒家、莊家與和局賠率完整。</p><a class="more" href="baccarat-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">輪盤</span><h3>歐式輪盤</h3><p>37 格輪盤、easeOutQuint 減速曲線、球體彈跳，直注與紅黑單雙投注結算。</p><a class="more" href="roulette-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">CRASH</span><h3>Crash 崩盤</h3><p>即時倍數曲線、手動與自動兌現、SHA-256 種子決定崩盤點，可重新驗證。</p><a class="more" href="crash-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">RGS 整合</span><h3>Crash + RGS</h3><p>加入 roundId 冪等、回傳遺失重連、伺服器端兌現倍數驗證與 settle 結算。</p><a class="more" href="crash-rgs-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">ENGINE</span><h3>共用引擎骨架</h3><p>GameLoop、FSM、AudioManager、ParticleSystem、ObjectPool 與 Stage 六個可複用模組。</p><a class="more" href="engine-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">RGS</span><h3>RGS 前端 Adapter</h3><p>roundId 冪等鍵、指數退避重連、競態防護與 settle 確認，附流程圖與 API 規格。</p><a class="more" href="rgs-client-demo.html">開啟範例 →</a></article>
+      <article class="card"><span class="tag">HTTP API</span><h3>RGS HTTP Client</h3><p>以 fetch 串接真實後端的用戶端，示範下注、查局、重連與結算的完整呼叫流程。</p><a class="more" href="rgs-client-http.html">開啟範例 →</a></article>
+    </div>
+  </section>
+
+  <section id="tech" aria-labelledby="tech-title">
+    <h2 id="tech-title">技術架構與設計原則</h2>
+    <p>所有範例共用一套引擎設計：以固定步長 <strong>GameLoop</strong> 隔離更新與渲染，避免不同刷新率造成表現不一致；以 <strong>FSM</strong> 管理 IDLE、SPINNING、STOPPING、WIN_PRESENTATION 等狀態，並攔截非法轉換；以 <strong>ObjectPool</strong> 與 <strong>ParticleSystem</strong> 重用物件，降低垃圾回收壓力；<strong>AudioManager</strong> 在使用者手勢中解鎖 iOS Safari 的 AudioContext；<strong>Stage</strong> 統一處理 DPR 與橫豎屏 RWD。</p>
+    <p>在博弈邏輯上，結果一律由後端 RNG 決定。前端以 <strong>roundId</strong> 作為冪等鍵，下注前寫入 sessionStorage；若回傳遺失，重連時用同一個 roundId 向伺服器查回結果，直接還原演出而不會重複扣款。Provably Fair 則透過開局公開 <code>serverSeedHash</code>、结束揭露 <code>serverSeed</code>，讓玩家可獨立重算驗證。</p>
+  </section>
+
+  <section id="faq" class="faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">常見問題</h2>
+    <item>
+      <h3>什麼是 H5 博弈遊戲？</h3>
+      <p>H5 博弈遊戲是以 HTML5、JavaScript 與 Canvas 或 WebGL 開發、可直接在瀏覽器執行的博弈類遊戲，例如老虎機、捕魚機、百家樂、輪盤與 Crash。它不需要安裝 App，並可同時适配桌面與行動裝置。</p>
+    </item>
+    <item>
+      <h3>如何確保線上老虎機結果公平？</h3>
+      <p>公平性依靠三件事：結果由伺服器 RNG 決定而非前端；開局前公開 serverSeedHash、结束後揭露 serverSeed 供玩家重算驗證（Provably Fair）；所有下注與結果寫入不可竄改帳本。前端只負責視覺演繹。</p>
+    </item>
+    <item>
+      <h3>什麼是 RGS？</h3>
+      <p>RGS（Remote Gaming Server，遠端遊戲伺服器）是博弈遊戲的後端服務，負責玩家餘額、下注、隨機結果、結算與紀錄。前端透過 roundId 冪等鍵呼叫 RGS，即使斷線重連也能查回同一局結果。</p>
+    </item>
+    <item>
+      <h3>如何在行動端維持 60 FPS？</h3>
+      <p>關鍵做法包括：使用固定步長 GameLoop；用物件池重用精靈與粒子以避免垃圾回收抖動；以 Sprite Atlas 合併繪製呼叫；限制 devicePixelRatio 上限；在分頁隱藏時暫停渲染；並用 touch-action 與 pointer events 消除觸控延遲。</p>
+    </item>
+    <item>
+      <h3>iOS Safari 的音訊要如何解鎖？</h3>
+      <p>AudioContext 必須在使用者手勢（pointerdown 或 touchstart）中建立或呼叫 resume()，否則會保持 suspended 狀態而沒有聲音。本站的引擎已內建解鎖邏輯。</p>
+    </item>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p>Casino H5 Games Lab　·　技術研究與程式碼範例站　·　<strong>僅供開發技術參考，不提供任何實際博彩服務</strong>。</p>
+    <p><a href="/">首頁</a>　·　<a href="rgs-integration.md">RGS 串接規格</a>　·　<a href="sitemap.xml">Sitemap</a>　·　<a href="llms.txt">AI 摘要索引</a></p>
+  </div>
+</footer>
+</body>
+</html>
