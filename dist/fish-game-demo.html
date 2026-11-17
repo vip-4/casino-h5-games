@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>捕魚機 — 共用引擎版（engine.js）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#02060f;color:#fff;font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;
+    overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:6px}
+  #hud,#ctrl{width:min(96vw,1000px);display:flex;gap:8px;flex-wrap:wrap}
+  .stat{flex:1;min-width:90px;background:rgba(0,30,60,.6);border:1px solid rgba(80,200,255,.3);border-radius:10px;padding:6px 10px;text-align:center}
+  .stat b{display:block;font-size:20px;color:#7ef0ff}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(96vw,1000px);aspect-ratio:5/3;border-radius:14px;overflow:hidden;box-shadow:0 12px 36px rgba(0,0,0,.7)}
+  #stage canvas{width:100%;height:100%;display:block;cursor:crosshair}
+  #ctrl button{border:none;border-radius:9px;padding:10px;font-weight:700;font-size:13px;color:#fff;
+    background:linear-gradient(#2f7fbf,#12507f);box-shadow:0 4px 0 #0a3050;cursor:pointer;flex:1;min-width:80px}
+  #ctrl button.on{color:#2a1400;background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 4px 0 #a86a00}
+  button:active{transform:translateY(3px);box-shadow:0 1px 0 #0a3050}
+  #hint{width:min(96vw,1000px);font-size:10px;opacity:.55;text-align:center}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="捕魚機 HTML5 範例：物件池魚群與子彈、圓形碰撞偵測、1x 至 10x 炮台倍率、BOSS 血條與金幣粒子特效。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/fish-game-demo.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/fish-game-demo.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/fish-game-demo.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="捕魚機 — 共用引擎版（engine.js）">
+<meta property="og:description" content="捕魚機 HTML5 範例：物件池魚群與子彈、圓形碰撞偵測、1x 至 10x 炮台倍率、BOSS 血條與金幣粒子特效。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/fish-game-demo.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="捕魚機 — 共用引擎版（engine.js）">
+<meta name="twitter:description" content="捕魚機 HTML5 範例：物件池魚群與子彈、圓形碰撞偵測、1x 至 10x 炮台倍率、BOSS 血條與金幣粒子特效。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>金幣</span><b id="coin">1000</b></div>
+    <div class="stat"><span>炮台倍率</span><b id="power">1x</b></div>
+    <div class="stat"><span>得分</span><b id="score">0</b></div>
+    <div class="stat"><span>魚數 / FPS</span><b id="info">0 / 0</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <button data-p="1" class="on">1x</button><button data-p="2">2x</button><button data-p="5">5x</button>
+    <button data-p="10">10x</button><button id="fire">發炮（持續）</button>
+  </div>
+  <div id="hint">共用引擎：Stage / GameLoop / ObjectPool / ParticleSystem / AudioManager　·　移動瞄準，點畫面或按住發炮射擊</div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function () {
+  const { ObjectPool, AudioManager, ParticleSystem, GameLoop, Stage } = Engine;
+  const $ = id => document.getElementById(id);
+
+  /* ---- 共用模組實例 ---- */
+  const stage = new Stage($("game"));
+  const audio = new AudioManager(.25)
+    .define("shoot", { freq: 420, dur: .06, type: "square", vol: .1, to: 180 })
+    .define("hit",   { freq: 700, dur: .05, type: "triangle", vol: .12 })
+    .define("earn",  { seq: [880, 1100, 1320], dur: .16, type: "sine", vol: .18, gap: 55 })
+    .define("boss",  { freq: 180, dur: .5, type: "sawtooth", vol: .25, to: 60 });
+  const particles = new ParticleSystem(stage.ctx, 400);
+
+  const TYPES = [
+    { name: "小魚", hp: 1,  mul: 2,  size: 18, color: "#5ee0ff", speed: 42 },
+    { name: "中魚", hp: 3,  mul: 5,  size: 28, color: "#7cff9b", speed: 32 },
+    { name: "大魚", hp: 8,  mul: 15, size: 42, color: "#ffb84d", speed: 24 },
+    { name: "BOSS", hp: 26, mul: 50, size: 64, color: "#ff5b8a", speed: 16 }
+  ];
+
+  /* ---- 物件池（魚 / 子彈） ---- */
+  const FISH = new ObjectPool(70,
+    () => ({ active: false, x: 0, y: 0, vx: 0, vy: 0, dir: 1, hp: 0, maxHp: 0, type: 0, phase: 0, wob: 0, flash: 0, r: 0 }),
+    f => { f.flash = 0; }
+  );
+  const BULLETS = new ObjectPool(160,
+    () => ({ active: false, x: 0, y: 0, vx: 0, vy: 0, power: 1, r: 4, life: 0 }),
+    b => { b.life = 1.6; }
+  );
+
+  let coin = 1000, score = 0, power = 1, aimX = stage.w / 2, aimY = stage.h / 2;
+  let firing = false, shake = 0, now = 0, spawnT = 0;
+  const cannon = { x: 0, y: 0, angle: -Math.PI / 2 };
+
+  function spawnFish() {
+    const f = FISH.acquire();
+    if (!f) return; // 池滿：不新建物件，避免 GC
+    const t = Math.random() < .08 ? 3 : (Math.random() < .25 ? 2 : (Math.random() < .55 ? 1 : 0));
+    const d = TYPES[t], dir = Math.random() < .5 ? 1 : -1;
+    f.type = t; f.hp = f.maxHp = d.hp; f.r = d.size;
+    f.x = dir > 0 ? -d.size : stage.w + d.size;
+    f.y = 60 + Math.random() * (stage.h - 140);
+    f.vx = dir * d.speed * (.8 + Math.random() * .5);
+    f.dir = dir; f.phase = Math.random() * 6.28; f.wob = 8 + Math.random() * 22;
+  }
+  function shoot() {
+    if (coin < power) return;
+    coin -= power; sync();
+    const b = BULLETS.acquire();
+    if (!b) return;
+    const a = Math.atan2(aimY - cannon.y, aimX - cannon.x), sp = 620;
+    b.x = cannon.x + Math.cos(a) * 28; b.y = cannon.y + Math.sin(a) * 28;
+    b.vx = Math.cos(a) * sp; b.vy = Math.sin(a) * sp;
+    b.power = power; b.r = 3 + power * .5;
+    audio.play("shoot");
+  }
+
+  function update(dt) {
+    now += dt;
+    if (shake > 0) shake = Math.max(0, shake - dt * 26);
+    cannon.x = stage.w / 2; cannon.y = stage.h - 42;
+    cannon.angle = Math.atan2(aimY - cannon.y, aimX - cannon.x);
+    if (firing && Math.floor(now * 12) !== Math.floor((now - dt) * 12)) shoot();
+
+    FISH.forEach(f => {
+      f.x += f.vx * dt; f.phase += dt * 2.4; f.y += Math.sin(f.phase) * f.wob * dt;
+      if (f.flash > 0) f.flash -= dt;
+      if (f.x < -120 || f.x > stage.w + 120) FISH.release(f);
+    });
+
+    for (const b of BULLETS.items) {
+      if (!b.active) continue;
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      if (b.life <= 0 || b.x < -20 || b.x > stage.w + 20 || b.y < -20 || b.y > stage.h + 20) { BULLETS.release(b); continue; }
+      for (const f of FISH.items) {
+        if (!f.active) continue;
+        const dx = f.x - b.x, dy = f.y - b.y, rr = f.r * .8 + b.r;
+        if (dx * dx + dy * dy < rr * rr) {
+          BULLETS.release(b); f.hp -= b.power; f.flash = .12;
+          audio.play("hit");
+          particles.burst(b.x, b.y, 6, { color: "#fff", power: .5, life: .35, gravity: 100, shape: 1 });
+          if (f.hp <= 0) {
+            const d = TYPES[f.type], gain = d.mul * b.power;
+            coin += gain; score += gain; FISH.release(f);
+            particles.burst(f.x, f.y, f.type === 3 ? 90 : 26, { color: d.color, power: 1, life: .8, gravity: 160, shape: 1 });
+            audio.play(f.type === 3 ? "boss" : "earn");
+            if (f.type === 3) shake = 18;
+            sync();
+          }
+          break;
+        }
+      }
+    }
+    particles.update(dt);
+    spawnT += dt;
+    if (spawnT > .7) { spawnT = 0; spawnFish(); }
+  }
+
+  function drawFish(f) {
+    const c = stage.ctx, d = TYPES[f.type], s = f.r;
+    c.save(); c.translate(f.x, f.y); c.scale(f.dir, 1);
+    c.fillStyle = f.flash > 0 ? "#fff" : d.color; c.globalAlpha = .85;
+    c.beginPath(); c.moveTo(-s * .8, 0); c.lineTo(-s * 1.5, -s * .55); c.lineTo(-s * 1.4, s * .55); c.closePath(); c.fill();
+    c.globalAlpha = 1;
+    const g = c.createLinearGradient(0, -s, 0, s);
+    g.addColorStop(0, "#fff"); g.addColorStop(.25, f.flash > 0 ? "#fff" : d.color); g.addColorStop(1, "#0a2540");
+    c.fillStyle = g; c.beginPath(); c.ellipse(0, 0, s, s * .65, 0, 0, 6.283); c.fill();
+    c.strokeStyle = "rgba(255,255,255,.4)"; c.lineWidth = 1.5; c.stroke();
+    c.fillStyle = "rgba(255,255,255,.35)"; c.beginPath(); c.ellipse(-s * .15, -s * .55, s * .35, s * .2, -.5, 0, 6.283); c.fill();
+    c.fillStyle = "#fff"; c.beginPath(); c.arc(s * .45, -s * .14, s * .16, 0, 6.283); c.fill();
+    c.fillStyle = "#000"; c.beginPath(); c.arc(s * .48, -s * .14, s * .08, 0, 6.283); c.fill();
+    c.restore();
+    if (f.hp < f.maxHp && f.type >= 2) {
+      const w = s * 1.6;
+      c.fillStyle = "rgba(0,0,0,.5)"; c.fillRect(f.x - w / 2, f.y - s - 10, w, 4);
+      c.fillStyle = "#ff5b6e"; c.fillRect(f.x - w / 2, f.y - s - 10, w * Math.max(0, f.hp / f.maxHp), 4);
+    }
+  }
+  function render() {
+    const c = stage.begin(), W = stage.w, H = stage.h;
+    const g = c.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#0a3a63"); g.addColorStop(.6, "#06243f"); g.addColorStop(1, "#03101f");
+    c.fillStyle = g; c.fillRect(0, 0, W, H);
+    c.save(); c.globalAlpha = .06; c.fillStyle = "#bff5ff";
+    for (let i = 0; i < 4; i++) { c.beginPath(); c.moveTo(W * (.1 + i * .24), 0); c.lineTo(W * (.05 + i * .24), H); c.lineTo(W * (.18 + i * .24), H); c.closePath(); c.fill(); }
+    c.restore();
+    c.save(); if (shake > 0) c.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    FISH.forEach(drawFish);
+    for (const b of BULLETS.items) if (b.active) {
+      c.fillStyle = "#ffe06a"; c.shadowColor = "#ffd700"; c.shadowBlur = 10;
+      c.beginPath(); c.arc(b.x, b.y, b.r, 0, 6.283); c.fill(); c.shadowBlur = 0;
+    }
+    particles.draw();
+    c.save(); c.translate(cannon.x, cannon.y); c.rotate(cannon.angle + Math.PI / 2);
+    c.fillStyle = "#1a3a5a"; c.beginPath(); c.arc(0, 0, 26, Math.PI, 0); c.fill();
+    c.fillStyle = "#7ef0ff"; c.fillRect(-7, -44, 14, 46);
+    c.fillStyle = "#ffd700"; c.fillRect(-10, -46, 20, 8); c.restore();
+    c.strokeStyle = "rgba(126,240,255,.25)"; c.lineWidth = 1; c.setLineDash([6, 8]);
+    c.beginPath(); c.moveTo(cannon.x, cannon.y); c.lineTo(aimX, aimY); c.stroke(); c.setLineDash([]);
+    c.restore();
+    $("info").textContent = FISH.activeCount + " / " + loop.fps;
+  }
+
+  const loop = new GameLoop({ update, render });
+  function sync() { $("coin").textContent = coin; $("score").textContent = score; $("power").textContent = power + "x"; }
+  document.querySelectorAll("#ctrl button[data-p]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#ctrl button[data-p]").forEach(x => x.classList.remove("on"));
+    b.classList.add("on"); power = +b.dataset.p; sync();
+  });
+  const fireBtn = $("fire");
+  fireBtn.onpointerdown = e => { e.preventDefault(); firing = true; };
+  window.addEventListener("pointerup", () => firing = false);
+  window.addEventListener("pointercancel", () => firing = false);
+  function aim(e) { const r = $("game").getBoundingClientRect(); aimX = (e.clientX - r.left) * (stage.w / r.width); aimY = (e.clientY - r.top) * (stage.h / r.height); }
+  $("game").addEventListener("pointermove", aim);
+  $("game").addEventListener("pointerdown", e => { aim(e); shoot(); });
+  for (let i = 0; i < 22; i++) spawnFish();
+  sync(); loop.start();
+})();
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"捕魚機 — 共用引擎版（engine.js）","description":"捕魚機 HTML5 範例：物件池魚群與子彈、圓形碰撞偵測、1x 至 10x 炮台倍率、BOSS 血條與金幣粒子特效。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/fish-game-demo.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
