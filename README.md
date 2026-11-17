@@ -44,3 +44,40 @@ CI/CD 設定：
 
 - GitHub Actions **Secret**：`CLOUDFLARE_API_TOKEN`（具備 `Pages:Edit` 權限的 Cloudflare API Token）
 - GitHub Actions **Variable**：`CLOUDFLARE_ACCOUNT_ID`（Cloudflare Account ID，已由部署腳本自動寫入）
+
+### 部署到 Firebase Hosting
+
+`firebase.json` 已設定 `public: dist`、SPA rewrite 與快取 headers。CI 會自動把站內 canonical / og:url / sitemap / llms.txt 的網域改寫成 `https://<FIREBASE_PROJECT_ID>.web.app`。
+
+需在 GitHub 倉庫設定：
+
+- **Variable**：`FIREBASE_PROJECT_ID`（你的 Firebase / GCP 專案 ID）
+- **Secret**：`FIREBASE_SERVICE_ACCOUNT`（Firebase 服務帳號 JSON 全文）
+
+取得服務帳號 JSON：
+
+```bash
+gcloud auth login
+gcloud config set project <FIREBASE_PROJECT_ID>
+gcloud iam service-accounts create github-actions-firebase --display-name "GitHub Actions Firebase Deploy"
+gcloud iam service-accounts keys create key.json \
+  --iam-account=github-actions-firebase@<FIREBASE_PROJECT_ID>.iam.gserviceaccount.com
+```
+
+把 `key.json` 的內容貼到 Secret `FIREBASE_SERVICE_ACCOUNT`。若專案尚未啟用 Firebase Hosting：
+
+```bash
+firebase login
+firebase projects:list
+firebase use <FIREBASE_PROJECT_ID>
+firebase deploy --only hosting --project <FIREBASE_PROJECT_ID>
+```
+
+### Google 認證說明
+
+```bash
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/webmasters,https://www.googleapis.com/auth/cloud-platform
+```
+
+此指令為**互動式 OAuth**，必須由本人在瀏覽器完成登入；CI/CD 請改用上面的服務帳號 JSON。
