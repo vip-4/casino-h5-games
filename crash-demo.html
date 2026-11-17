@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Crash 崩盤 — 共用引擎版（engine.js）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:radial-gradient(circle at 50% 10%,#12203a,#070b16 60%,#03050c);color:#fff;
+    font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:6px}
+  #hud,#ctrl{width:min(96vw,960px);display:flex;gap:8px;flex-wrap:wrap}
+  .stat{flex:1;min-width:88px;background:rgba(0,0,0,.42);border:1px solid rgba(80,200,255,.25);border-radius:10px;padding:6px 10px;text-align:center}
+  .stat b{display:block;font-size:21px;color:#5ee0ff}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(96vw,960px);aspect-ratio:8/5;border-radius:14px;overflow:hidden;box-shadow:0 10px 36px rgba(0,0,0,.6)}
+  #stage canvas{width:100%;height:100%;display:block}
+  #ctrl button{border:none;border-radius:10px;padding:11px 10px;font-weight:700;font-size:14px;color:#05202b;
+    background:linear-gradient(#7ef0ff,#26a9d6);box-shadow:0 4px 0 #0d6a8c;cursor:pointer;flex:1;min-width:90px}
+  #ctrl button:active{transform:translateY(3px);box-shadow:0 1px 0 #0d6a8c}
+  #ctrl button.ghost{color:#fff;background:linear-gradient(#3a4a70,#202b48);box-shadow:0 4px 0 #101728}
+  #ctrl button.cash{color:#2a1400;background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 4px 0 #a86a00}
+  button:disabled{filter:grayscale(.8) brightness(.55);cursor:default}
+  #hint{width:min(96vw,960px);font-size:10px;opacity:.55;text-align:center;line-height:1.6}
+  #fair{font-size:10px;opacity:.6;word-break:break-all}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額</span><b id="bal">1000</b></div>
+    <div class="stat"><span>注額</span><b id="bet">10</b></div>
+    <div class="stat"><span>倍數</span><b id="mult">1.00x</b></div>
+    <div class="stat"><span>FSM</span><b id="status" style="font-size:15px">IDLE</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <button class="ghost" id="betDown">－ 注額</button><button id="betBtn">下注開始</button><button class="ghost" id="betUp">＋ 注額</button>
+    <button class="ghost" id="autoBtn">自動兌現：關</button>
+    <button class="cash" id="cashBtn" disabled>立即兌現 CASH OUT</button>
+  </div>
+  <div id="hint">共用引擎：FSM / GameLoop / ParticleSystem / AudioManager / Stage　·　結果由伺服器種子 SHA-256 決定（Provably Fair）</div>
+  <div id="fair">ServerSeedHash：—</div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function () {
+  const { FSM, AudioManager, ParticleSystem, GameLoop, Stage } = Engine;
+  const $ = id => document.getElementById(id);
+
+  const stage = new Stage($("game"));
+  const audio = new AudioManager(.3)
+    .define("tick",  { freq: 880, dur: .05, type: "square", vol: .12 })
+    .define("cash",  { seq: [659, 880], dur: .25, type: "triangle", vol: .3, gap: 70 })
+    .define("crash", { freq: 120, dur: .6, type: "sawtooth", vol: .35, to: 40 });
+  const particles = new ParticleSystem(stage.ctx, 300);
+
+  const fsm = new FSM("IDLE", {
+    IDLE: ["COUNTDOWN", "SETTLE"], COUNTDOWN: ["RUNNING"],
+    RUNNING: ["CRASHED", "SETTLE"], CRASHED: ["IDLE"], SETTLE: ["IDLE"]
+  }, (prev, next) => {
+    $("status").textContent = next;
+    $("betBtn").disabled = next !== "IDLE";
+    $("cashBtn").disabled = !fsm.is("RUNNING") || cashed;
+    $("betDown").disabled = $("betUp").disabled = $("autoBtn").disabled = next !== "IDLE";
+  });
+
+  async function sha256(s) {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(d)).map(x => x.toString(16).padStart(2, "0")).join("");
+  }
+  const Server = {
+    balance: 1000,
+    async startRound(bet) {
+      if (this.balance < bet) throw new Error("INSUFFICIENT_FUNDS");
+      const seed = crypto.randomUUID() + crypto.randomUUID();
+      const hash = await sha256(seed);
+      const r = parseInt(hash.slice(0, 8), 16) / 0xffffffff;
+      const crashMul = Math.max(1.01, 1 + 19 * Math.pow(r, 3.2));
+      const crashTime = 2.2 * Math.log2(crashMul) + .15;
+      this.balance -= bet;
+      return { roundId: "C" + Date.now(), bet, seed, hash, crashMul, crashTime, settled: false };
+    },
+    settle(round, payout) { if (!round.settled) { this.balance += payout; round.settled = true; } return this.balance; }
+  };
+
+  let bet = 10, autoTarget = 0, round = null, t = 0, countdown = 0, mult = 1;
+  let cashed = false, payout = 0, shake = 0, crashAt = 0, settleWait = 0, now = 0;
+  const MAXP = 1400, px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+  let pn = 0;
+
+  function sync() { $("bal").textContent = Server.balance; $("bet").textContent = bet; $("mult").textContent = mult.toFixed(2) + "x"; }
+  function curveY(m) { return stage.h * .86 - (Math.log2(Math.max(1, m)) / 5) * stage.h * .72; }
+  function startBet() {
+    if (!fsm.is("IDLE")) return;
+    Server.startRound(bet).then(r => {
+      round = r; t = 0; mult = 1; pn = 0; cashed = false; payout = 0; countdown = 2.2;
+      $("fair").textContent = "ServerSeedHash（開局公開）：" + r.hash.slice(0, 32) + "…";
+      fsm.set("COUNTDOWN"); sync();
+    }).catch(() => {});
+  }
+  function cashout() {
+    if (!fsm.is("RUNNING") || cashed) return;
+    cashed = true; payout = Math.round(bet * mult * 100) / 100;
+    Server.settle(round, payout);
+    audio.play("cash"); particles.burst(stage.w * .5, stage.h * .35, 50, { colors: ["#ffe06a", "#5ee0ff"], power: 1.1, life: .8, shape: 1 }); shake = 6;
+    settleWait = 90; fsm.set("SETTLE"); sync();
+  }
+
+  function update(dt) {
+    now += dt;
+    if (shake > 0) shake = Math.max(0, shake - dt * 26);
+    particles.update(dt);
+    if (fsm.is("COUNTDOWN")) {
+      countdown -= dt;
+      if (countdown <= 0) { t = 0; mult = 1; pn = 0; fsm.set("RUNNING"); audio.play("tick"); }
+    } else if (fsm.is("RUNNING")) {
+      t += dt; mult = Math.pow(2, t / 2.2);
+      if (pn < MAXP) { px[pn] = 60 + (t / 12) * (stage.w - 80); py[pn] = curveY(mult); pn++; }
+      if (autoTarget > 0 && mult >= autoTarget) cashout();
+      if (t >= round.crashTime) {
+        mult = round.crashMul;
+        if (!cashed) { Server.settle(round, 0); payout = 0; }
+        audio.play("crash"); shake = 18;
+        particles.burst(px[Math.max(0, pn - 1)] || stage.w * .7, py[Math.max(0, pn - 1)] || stage.h * .3,
+          180, { colors: ["#5ee0ff", "#ffe06a", "#ff5b6e"], power: 1.5, life: 1.2, shape: 1 });
+        $("fair").textContent = "Hash：" + round.hash.slice(0, 24) + "…　揭露 Seed：" + round.seed.slice(0, 24) + "…（可重新驗證崩盤點）";
+        crashAt = now; fsm.set("CRASHED"); sync();
+      }
+    } else if (fsm.is("CRASHED")) {
+      if (now - crashAt > 1.6) { fsm.set("IDLE"); mult = 1; sync(); }
+    } else if (fsm.is("SETTLE")) {
+      if (--settleWait <= 0) { fsm.set("IDLE"); mult = 1; sync(); }
+    }
+  }
+
+  function render() {
+    const c = stage.begin(), W = stage.w, H = stage.h;
+    const bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#0d1729"); bg.addColorStop(1, "#050912");
+    c.fillStyle = bg; c.fillRect(0, 0, W, H); c.save();
+    if (shake > 0) c.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    c.strokeStyle = "rgba(120,180,220,.12)"; c.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) { const y = H * .86 - i * (H * .72 / 8); c.beginPath(); c.moveTo(50, y); c.lineTo(W - 16, y); c.stroke();
+      c.fillStyle = "rgba(255,255,255,.35)"; c.font = "11px sans-serif"; c.textAlign = "left"; c.fillText(Math.pow(2, i).toFixed(i < 3 ? 1 : 0) + "x", 6, y + 4); }
+    for (let i = 0; i <= 12; i += 2) { const x = 60 + (i / 12) * (W - 80); c.beginPath(); c.moveTo(x, H * .1); c.lineTo(x, H * .94); c.stroke(); }
+    if (pn > 1) {
+      c.beginPath(); c.moveTo(px[0], py[0]); for (let i = 1; i < pn; i++) c.lineTo(px[i], py[i]);
+      c.strokeStyle = cashed ? "#ffe06a" : (fsm.is("CRASHED") ? "#ff5b6e" : "#5ee0ff");
+      c.lineWidth = 3; c.shadowColor = c.strokeStyle; c.shadowBlur = 18; c.stroke(); c.shadowBlur = 0;
+      c.save(); c.translate(px[pn - 1], py[pn - 1]); c.rotate(-.5);
+      c.fillStyle = cashed ? "#ffe06a" : "#5ee0ff"; c.shadowColor = c.fillStyle; c.shadowBlur = 20;
+      c.beginPath(); c.moveTo(16, 0); c.lineTo(-12, -9); c.lineTo(-7, 0); c.lineTo(-12, 9); c.closePath(); c.fill(); c.shadowBlur = 0; c.restore();
+    }
+    particles.draw();
+    c.textAlign = "center"; c.textBaseline = "middle";
+    if (fsm.is("IDLE")) { c.fillStyle = "rgba(255,255,255,.5)"; c.font = "bold 22px sans-serif"; c.fillText("下注後飛行，崩盤前兌現", W / 2, H * .45); }
+    else if (fsm.is("COUNTDOWN")) { c.fillStyle = "#ffe06a"; c.font = "bold 64px sans-serif"; c.fillText(Math.ceil(countdown), W / 2, H * .42); }
+    else if (fsm.is("RUNNING")) {
+      c.fillStyle = cashed ? "#ffe06a" : "#5ee0ff"; c.font = "bold 54px sans-serif";
+      c.shadowColor = c.fillStyle; c.shadowBlur = 20; c.fillText(mult.toFixed(2) + "x", W / 2, H * .35); c.shadowBlur = 0;
+      c.font = "13px sans-serif"; c.fillStyle = "#fff"; c.fillText(cashed ? "已兌現 " + payout.toFixed(2) : "崩盤點未知…", W / 2, H * .44);
+    } else if (fsm.is("CRASHED")) {
+      c.fillStyle = "#ff5b6e"; c.font = "bold 50px sans-serif"; c.shadowColor = "#ff5b6e"; c.shadowBlur = 24;
+      c.fillText("CRASH " + round.crashMul.toFixed(2) + "x", W / 2, H * .38); c.shadowBlur = 0;
+      c.font = "16px sans-serif"; c.fillStyle = "#fff"; c.fillText(cashed ? "已兌現 " + payout.toFixed(2) + "　✓ 安全下車" : "未兌現，損失注額", W / 2, H * .48);
+    } else if (fsm.is("SETTLE")) { c.fillStyle = "#ffe06a"; c.font = "bold 40px sans-serif"; c.fillText("CASH OUT +" + payout.toFixed(2), W / 2, H * .38); }
+    c.restore();
+  }
+
+  const loop = new GameLoop({ update, render });
+  $("betBtn").onclick = startBet; $("cashBtn").onclick = cashout;
+  $("betDown").onclick = () => { if (fsm.is("IDLE")) { bet = Math.max(1, bet - 1); sync(); } };
+  $("betUp").onclick = () => { if (fsm.is("IDLE")) { bet = Math.min(500, bet + 1); sync(); } };
+  $("autoBtn").onclick = () => { if (!fsm.is("IDLE")) return; autoTarget = autoTarget === 0 ? 2 : (autoTarget >= 10 ? 0 : autoTarget + 1); $("autoBtn").textContent = "自動兌現：" + (autoTarget ? autoTarget + "x" : "關"); };
+  sync(); loop.start();
+})();
+</script>
+</body>
+</html>
