@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>RGS 串接 Demo — roundId / 冪等 / 斷線重連</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;min-height:100vh;background:#0b0618;color:#eaeaea;font-family:-apple-system,"PingFang TC","Microsoft JhengHei",monospace;padding:16px}
+  h1{font-size:18px;color:#ffd700;margin:0 0 4px}
+  p.sub{font-size:12px;opacity:.6;margin:0 0 14px}
+  .panel{max-width:820px;margin:0 auto;display:grid;gap:12px}
+  .card{background:rgba(255,255,255,.05);border:1px solid rgba(255,215,0,.25);border-radius:12px;padding:14px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .stat{flex:1;min-width:120px;text-align:center;background:#160b2e;border-radius:8px;padding:8px}
+  .stat b{display:block;font-size:22px;color:#ffd700}
+  .stat span{font-size:11px;opacity:.6}
+  .reels{display:flex;gap:8px;justify-content:center;margin:10px 0}
+  .reel{width:74px;height:74px;background:linear-gradient(#fff,#ddd);color:#111;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:700;box-shadow:inset 0 0 0 3px rgba(0,0,0,.15)}
+  button{border:none;border-radius:9px;padding:11px 16px;font-weight:700;font-size:14px;background:linear-gradient(#ffe06a,#f5a623);color:#2a1400;cursor:pointer}
+  button.ghost{background:#2c1f4d;color:#fff}
+  button:disabled{filter:grayscale(.8) brightness(.6);cursor:default}
+  label{font-size:13px;display:flex;gap:6px;align-items:center}
+  #log{max-height:260px;overflow:auto;font-size:12px;line-height:1.7;background:#05020d;border-radius:8px;padding:10px;white-space:pre-wrap}
+  .L-ok{color:#6f6}.L-warn{color:#ffcc55}.L-err{color:#ff6b6b}.L-info{color:#8bb8ff}
+  .badge{display:inline-block;padding:3px 9px;border-radius:20px;background:#2c1f4d;font-size:12px;color:#ffd700}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="RGS 前端 Adapter 範例：roundId 冪等鍵、指數退避重連、settle 確認與競態防護，附流程圖說明。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/rgs-client-demo.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/rgs-client-demo.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/rgs-client-demo.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="RGS 串接 Demo — roundId / 冪等 / 斷線重連">
+<meta property="og:description" content="RGS 前端 Adapter 範例：roundId 冪等鍵、指數退避重連、settle 確認與競態防護，附流程圖說明。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/rgs-client-demo.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="RGS 串接 Demo — roundId / 冪等 / 斷線重連">
+<meta name="twitter:description" content="RGS 前端 Adapter 範例：roundId 冪等鍵、指數退避重連、settle 確認與競態防護，附流程圖說明。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div class="panel">
+  <div class="card">
+    <h1>RGS 串接 Demo　<span class="badge" id="state">IDLE</span></h1>
+    <p class="sub">結果由「伺服器 RNG」決定；前端只拿 outcome 做演繹。所有請求帶 roundId，伺服器冪等。</p>
+    <div class="row">
+      <div class="stat"><span>餘額（伺服器）</span><b id="bal">1000</b></div>
+      <div class="stat"><span>注額</span><b id="bet">10</b></div>
+      <div class="stat"><span>贏分</span><b id="win">0</b></div>
+    </div>
+    <div class="reels"><div class="reel" id="r0">🍒</div><div class="reel" id="r1">🍋</div><div class="reel" id="r2">🔔</div></div>
+    <div class="row">
+      <button class="ghost" id="down">－ 注額</button>
+      <button id="spin">SPIN 下注</button>
+      <button class="ghost" id="up">＋ 注額</button>
+      <label><input type="checkbox" id="offline"> 模擬斷線</label>
+      <button class="ghost" id="reload">模擬重開頁面</button>
+    </div>
+    <p class="sub" id="roundInfo">roundId：—</p>
+  </div>
+  <div class="card"><div id="log"></div></div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * 1. Mock RGS（假伺服器）：
+ *    - 以 localStorage 當「伺服器帳本」，模擬持久化
+ *    - 同一 roundId 重複請求 → 回傳同一結果（冪等），不重複扣款
+ *    - 結果由伺服器 RNG 決定，前端看不到 RNG
+ * ========================================================== */
+const S = ["🍒","🍋","🔔","💎","7","BAR"];
+const MockRGS = {
+  key: "mockRGS",
+  db() { return JSON.parse(localStorage.getItem(this.key) || '{"balance":1000,"rounds":{}}'); },
+  save(d) { localStorage.setItem(this.key, JSON.stringify(d)); },
+  _delay(ms) { return new Promise(r => setTimeout(r, ms)); },
+  _offline() { return document.getElementById("offline").checked; },
+
+  async createRound({ roundId, betAmount, nonce }) {
+    await this._delay(200 + Math.random() * 350);
+    const d = this.db();
+    // 冪等：同一 roundId 直接回傳既有結果
+    if (d.rounds[roundId]) return structuredClone(d.rounds[roundId]);
+    if (d.balance < betAmount) throw new Error("INSUFFICIENT_FUNDS");
+
+    // 伺服器 RNG（此處仅供模擬；正式環境在後端）
+    const reels = [0,1,2].map(() => Math.floor(Math.random() * S.length));
+    const winAmount = reels[0] === reels[1] && reels[1] === reels[2] ? betAmount * 25 : (reels.filter(x => x === 0).length >= 2 ? betAmount * 2 : 0);
+    d.balance = d.balance - betAmount + winAmount;
+    const rec = { roundId, status: "SETTLED", outcome: { reels, winAmount }, balanceAfter: d.balance, nonce, settled: false };
+    d.rounds[roundId] = rec;
+    this.save(d);
+    // 關鍵情境：伺服器已扣款並產生結果，但回傳在網路半路遺失
+    if (this._offline()) throw new Error("RESPONSE_LOST");
+    return structuredClone(rec);
+  },
+
+  async getRound(roundId) {
+    if (this._offline()) throw new Error("NETWORK_OFFLINE");
+    await this._delay(150);
+    const rec = this.db().rounds[roundId];
+    return rec ? structuredClone(rec) : { roundId, status: "PENDING" };
+  },
+
+  async settle(roundId) {
+    if (this._offline()) throw new Error("NETWORK_OFFLINE");
+    await this._delay(80);
+    const d = this.db();
+    if (d.rounds[roundId]) { d.rounds[roundId].settled = true; this.save(d); }
+    return { roundId, settled: true };
+  }
+};
+
+/* ============================================================
+ * 2. RGS Client Adapter（可原樣搬到正式專案，只換 base / token）
+ * ========================================================== */
+class RGSClient {
+  constructor(server, onState) { this.server = server; this.onState = onState; }
+
+  async play(betAmount) {
+    // 下注前先產生 roundId 並持久化 —— 重連的關鍵
+    const roundId = crypto.randomUUID();
+    const nonce = crypto.randomUUID().slice(0, 8);
+    sessionStorage.setItem("pendingRound", JSON.stringify({ roundId, betAmount }));
+    log(`下注請求 roundId=${roundId.slice(0,8)}… bet=${betAmount}`, "info");
+    try {
+      const data = await this.server.createRound({ roundId, betAmount, nonce });
+      log("收到伺服器結果（RNG 決定）", "ok");
+      return this._finalize(data);
+    } catch (e) {
+      log(`連線失敗：${e.message} → 進入 RECONNECTING`, "err");
+      if (this.onState) this.onState(STATE.RECONNECTING);
+      return this.resume(roundId);
+    }
+  }
+
+  async resume(roundId) {
+    const delays = [300, 600, 1200, 2400, 4800, 8000]; // 指數退避 + 抖動
+    for (const d of delays) {
+      log(`重試 GET /rounds/${roundId.slice(0,8)}…（等待 ${d}ms）`, "warn");
+      await this._sleep(d + Math.random() * 200);
+      try {
+        const data = await this.server.getRound(roundId);
+        if (data.status === "PENDING") { log("伺服器：PENDING，繼續輪詢", "warn"); continue; }
+        if (data.status === "SETTLED") {
+          log("查得既有結果 → 直接從結果演繹，不再要求 RNG", "ok");
+          return this._finalize(data);
+        }
+      } catch (_) { log("重試仍失敗，繼續…", "err"); }
+    }
+    throw new Error("RECONNECT_FAILED:" + roundId); // UI 顯示 roundId 供客服查詢
+  }
+
+  _finalize(data) {
+    sessionStorage.removeItem("pendingRound");
+    this.server.settle(data.roundId).then(() => log("settle 完成，帳已結清", "ok")).catch(() => log("settle 失敗，由伺服器補帳", "warn"));
+    return data;
+  }
+
+  bootstrap() {
+    const p = JSON.parse(sessionStorage.getItem("pendingRound") || "null");
+    if (!p) return null;
+    log(`偵測到未完成局 roundId=${p.roundId.slice(0,8)}… → 自動重連`, "warn");
+    return this.resume(p.roundId);
+  }
+
+  _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+}
+
+/* ============================================================
+ * 3. UI / FSM 串接
+ * ========================================================== */
+const STATE = { IDLE:"IDLE", REQUESTING:"REQUESTING", SPINNING:"SPINNING", STOPPING:"STOPPING", WIN:"WIN_PRESENTATION", RECONNECTING:"RECONNECTING" };
+const $ = id => document.getElementById(id);
+let state = STATE.IDLE, bet = 10, reelTimer = null, spinDone = null;
+const rgs = new RGSClient(MockRGS, s => setState(s));
+
+function log(msg, cls="info") {
+  const el = $("log");
+  el.innerHTML += `<span class="L-${cls}">[${new Date().toLocaleTimeString()}] ${msg}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+}
+function setState(s) { state = s; $("state").textContent = s; $("spin").disabled = s !== STATE.IDLE; }
+function syncHUD(data) {
+  $("bal").textContent = data ? data.balanceAfter : MockRGS.db().balance;
+  $("bet").textContent = bet;
+  $("win").textContent = data ? data.outcome.winAmount : 0;
+}
+function startSpinVisual() {
+  $("win").textContent = "0";
+  clearInterval(reelTimer);
+  reelTimer = setInterval(() => { for (let i=0;i<3;i++) $("r"+i).textContent = S[Math.floor(Math.random()*S.length)]; }, 70);
+}
+function stopSpinVisual(data) {
+  clearInterval(reelTimer);
+  data.outcome.reels.forEach((idx,i) => $("r"+i).textContent = S[idx]);
+}
+
+async function doSpin() {
+  if (state !== STATE.IDLE) return; // 防連點
+  const d = MockRGS.db();
+  if (d.balance < bet) { log("餘額不足", "err"); return; }
+  setState(STATE.REQUESTING);
+  startSpinVisual();
+  try {
+    const data = await rgs.play(bet);          // 内部可能进入 RECONNECTING 并自行恢复
+    if (state === STATE.RECONNECTING) log("重連成功，接續演出", "ok");
+    setState(STATE.SPINNING);
+    await wait(450);
+    setState(STATE.STOPPING);
+    stopSpinVisual(data);
+    syncHUD(data);
+    if (data.outcome.winAmount > 0) { setState(STATE.WIN); log(`中獎！win=${data.outcome.winAmount}`, "ok"); await wait(1200); }
+    $("roundInfo").textContent = `roundId：${data.roundId}`;
+    setState(STATE.IDLE);
+  } catch (e) {
+    log(`重連耗盡：${e.message}。請保留 roundId 聯絡客服，切勿重下注。`, "err");
+    setState(STATE.IDLE);
+  }
+}
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+$("spin").onclick = doSpin;
+$("down").onclick = () => { if (state===STATE.IDLE) { bet=Math.max(1,bet-1); $("bet").textContent=bet; } };
+$("up").onclick   = () => { if (state===STATE.IDLE) { bet=Math.min(100,bet+1); $("bet").textContent=bet; } };
+$("reload").onclick = () => location.reload();
+
+syncHUD();
+log("就緒。勾選「模擬斷線」再按 SPIN，可觀察重連流程。", "info");
+// 頁面載入時自動檢查未完成局
+Promise.resolve(rgs.bootstrap()).then(data => { if (data) { stopSpinVisual(data); syncHUD(data); $("roundInfo").textContent = `roundId：${data.roundId}`; } }).catch(()=>{});
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"RGS 串接 Demo — roundId / 冪等 / 斷線重連","description":"RGS 前端 Adapter 範例：roundId 冪等鍵、指數退避重連、settle 確認與競態防護，附流程圖說明。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/rgs-client-demo.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
