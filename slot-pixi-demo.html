@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>PixiJS v8 Slot 老虎機 — Sprite Atlas + Glow Filter</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:radial-gradient(circle at 50% 15%,#2a0f4a,#120626 55%,#060210);color:#fff;
+    font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+  #hud,#controls{width:min(94vw,900px);display:flex;gap:10px}
+  #hud{justify-content:space-between}
+  .stat{flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(255,215,0,.35);border-radius:10px;padding:5px 10px;text-align:center}
+  .stat b{display:block;font-size:20px;color:#ffd700;letter-spacing:1px}
+  .stat span{font-size:11px;opacity:.7}
+  #stage{width:min(94vw,900px);aspect-ratio:3/2;border-radius:14px;overflow:hidden;
+    box-shadow:0 12px 40px rgba(0,0,0,.6),inset 0 0 0 2px rgba(255,215,0,.25)}
+  #stage canvas{width:100%;height:100%;display:block}
+  button{flex:1;border:none;border-radius:12px;padding:13px 0;font-size:16px;font-weight:700;color:#1a0b00;
+    background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 5px 0 #a86a00;cursor:pointer;transition:transform .06s}
+  button:active{transform:translateY(4px);box-shadow:0 1px 0 #a86a00}
+  button.ghost{color:#fff;background:linear-gradient(#4a3a6a,#2a1a4a);box-shadow:0 5px 0 #150a2a}
+  button:disabled{filter:grayscale(.7) brightness(.7)}
+  #hint{width:min(94vw,900px);text-align:center;font-size:11px;opacity:.55;line-height:1.6}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額</span><b id="balance">1000</b></div>
+    <div class="stat"><span>注額</span><b id="bet">10</b></div>
+    <div class="stat"><span>贏分</span><b id="win">0</b></div>
+  </div>
+  <div id="stage"></div>
+  <div id="controls">
+    <button class="ghost" id="betDown">－ 注額</button>
+    <button id="spin">SPIN 旋轉</button>
+    <button class="ghost" id="betUp">＋ 注額</button>
+  </div>
+  <div id="hint">PixiJS v8 WebGL　·　Runtime Sprite Atlas + 自訂 Glow Filter + Blur Bloom　·　點一下畫面解鎖音效</div>
+</div>
+<script src="pixi.min.js"></script>
+<script>
+"use strict";
+(async function () {
+
+/* ============================ 1. Easing ============================ */
+const Ease = {
+  outBack: t => { const c1=1.70158,c3=c1+1; return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2); },
+  outElastic: t => { const c4=(2*Math.PI)/3; return t===0?0:t===1?1:Math.pow(2,-10*t)*Math.sin((t*10-0.75)*c4)+1; }
+};
+
+/* ============================ 2. Audio（iOS 解鎖） ============================ */
+class AudioManager {
+  constructor(){
+    this.ctx=null;this.unlocked=false;
+    const unlock=()=>{
+      if(!this.ctx){const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;
+        this.ctx=new AC();this.master=this.ctx.createGain();this.master.gain.value=.35;this.master.connect(this.ctx.destination);}
+      if(this.ctx.state==="suspended")this.ctx.resume();this.unlocked=true;
+    };
+    window.addEventListener("pointerdown",unlock);window.addEventListener("touchstart",unlock);
+  }
+  _tone(f,d,type="sine",v=1,to=null){if(!this.ctx||!this.unlocked)return;const t=this.ctx.currentTime;
+    const o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.setValueAtTime(f,t);
+    if(to)o.frequency.exponentialRampToValueAtTime(to,t+d);
+    g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(v,t+.01);g.gain.exponentialRampToValueAtTime(.0001,t+d);
+    o.connect(g).connect(this.master);o.start(t);o.stop(t+d+.02);}
+  spin(){this._tone(220,.25,"sawtooth",.25,480);}
+  stop(){this._tone(160,.12,"square",.3,80);}
+  win(){[523,659,784,1047].forEach((f,i)=>setTimeout(()=>this._tone(f,.35,"triangle",.4),i*90));}
+  big(){[392,523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>this._tone(f,.5,"sawtooth",.3),i*70));}
+}
+
+/* ============================ 3. 資料 ============================ */
+const SYMBOLS=[
+  {id:"7",label:"7",color:"#ff3b30",payout:50},
+  {id:"BAR",label:"BAR",color:"#ffcc00",payout:30},
+  {id:"CHERRY",label:"🍒",color:"#e74c3c",payout:20},
+  {id:"LEMON",label:"🍋",color:"#f1c40f",payout:15},
+  {id:"BELL",label:"🔔",color:"#f39c12",payout:10},
+  {id:"DIAMOND",label:"💎",color:"#00bcd4",payout:100}
+];
+const N=SYMBOLS.length;
+
+/* ============================ 4. Pixi 初始化 ============================ */
+const {Application,Container,Sprite,Texture,ImageSource,Rectangle,Graphics,Text,BlurFilter,Filter}=PIXI;
+const app=new Application();
+await app.init({width:900,height:600,background:0x0a0418,antialias:true,resolution:Math.min(devicePixelRatio||1,2),autoDensity:true});
+document.getElementById("stage").appendChild(app.canvas);
+
+// WebGL Context Lost：顯示警告並在還原時讓 Pixi 自動重建 GPU 資源
+app.canvas.addEventListener("webglcontextlost",e=>{e.preventDefault();console.warn("[WebGL] context lost");});
+app.canvas.addEventListener("webglcontextrestored",()=>console.warn("[WebGL] context restored"));
+
+/* ============================ 5. Runtime Sprite Atlas ============================
+ * 正式專案會用 TexturePacker 產出 atlas.png + atlas.json，透過 Assets.load 載入。
+ * 此處在執行期把 6 種符號畫進同一張 canvas，再切成 sub-texture，
+ * 目的相同：減少 draw call / 避免每幀新建紋理。 */
+function buildAtlas(){
+  const CELL=192,cols=3,rows=2;
+  const cv=document.createElement("canvas");cv.width=CELL*cols;cv.height=CELL*rows;
+  const x=cv.getContext("2d");
+  SYMBOLS.forEach((s,i)=>{
+    const ox=(i%cols)*CELL,oy=((i/cols)|0)*CELL,p=8,w=CELL-p*2,h=CELL-p*2;
+    const g=x.createLinearGradient(ox,oy,ox,oy+CELL);
+    g.addColorStop(0,"#fff");g.addColorStop(.12,s.color);g.addColorStop(1,"#181818");
+    x.fillStyle=g;x.beginPath();x.roundRect(ox+p,oy+p,w,h,16);x.fill();
+    x.strokeStyle="rgba(255,255,255,.4)";x.lineWidth=3;x.stroke();
+    x.fillStyle="#fff";x.textAlign="center";x.textBaseline="middle";
+    x.font="bold 92px sans-serif";x.fillText(s.label,ox+CELL/2,oy+CELL/2+4);
+  });
+  const source=new ImageSource({resource:cv});
+  return SYMBOLS.map((_,i)=>new Texture({source,frame:new Rectangle((i%cols)*CELL,((i/cols)|0)*CELL,CELL,CELL)}));
+}
+const atlas=buildAtlas();
+
+/* ============================ 6. 自訂 Glow Filter（GLSL ES 3.0） ============================
+ * v8 使用 in/out + texture()。uInputSize 由引擎自動注入（zw = 1/尺寸）。
+ * 以十字取樣做廉價 bloom，中獎時把 uIntensity 從 0 推到 1。 */
+const FILTER_VERT=`
+  in vec2 aPosition;
+  out vec2 vTextureCoord;
+  uniform vec4 uInputSize;
+  uniform vec4 uOutputFrame;
+  uniform vec4 uOutputTexture;
+  vec4 filterVertexPosition(void){
+    vec2 position=aPosition*uOutputFrame.zw+uOutputFrame.xy;
+    position.x=position.x*(2.0/uOutputTexture.x)-1.0;
+    position.y=position.y*(2.0*uOutputTexture.z/uOutputTexture.y)-uOutputTexture.z;
+    return vec4(position,0.0,1.0);
+  }
+  vec2 filterTextureCoord(void){return aPosition*(uOutputFrame.zw*uInputSize.zw);}
+  void main(void){gl_Position=filterVertexPosition();vTextureCoord=filterTextureCoord();}
+`;
+function makeGlow(){return Filter.from({
+  gl:{vertex:FILTER_VERT,fragment:`
+    in vec2 vTextureCoord;
+    out vec4 finalColor;
+    uniform sampler2D uTexture;
+    uniform vec2 uTexel;
+    uniform float uIntensity;
+    void main(void){
+      vec4 base = texture(uTexture, vTextureCoord);
+      vec2 px = uTexel * 4.0;
+      vec3 g = vec3(0.0);
+      g += texture(uTexture, vTextureCoord + vec2( px.x,0.0)).rgb;
+      g += texture(uTexture, vTextureCoord + vec2(-px.x,0.0)).rgb;
+      g += texture(uTexture, vTextureCoord + vec2(0.0, px.y)).rgb;
+      g += texture(uTexture, vTextureCoord + vec2(0.0,-px.y)).rgb;
+      g *= 0.25;
+      finalColor = vec4(base.rgb + g * uIntensity, base.a);
+    }`},
+  resources:{glowUniforms:{uIntensity:{value:0,type:"f32"},uTexel:{value:new Float32Array([1/900,1/600]),type:"vec2<f32>"}}}
+});}
+const reelGlow=makeGlow(),textGlow=makeGlow();
+function gu_set(v){reelGlow.resources.glowUniforms.uniforms.uIntensity=v;textGlow.resources.glowUniforms.uniforms.uIntensity=v;}
+
+/* ============================ 7. 金幣粒子（Sprite 物件池） ============================ */
+function coinTexture(){
+  const cv=document.createElement("canvas");cv.width=cv.height=64;const x=cv.getContext("2d");
+  const g=x.createRadialGradient(20,18,4,32,32,30);g.addColorStop(0,"#fff6b0");g.addColorStop(.6,"#ffd700");g.addColorStop(1,"#b8860b");
+  x.fillStyle=g;x.beginPath();x.arc(32,32,28,0,Math.PI*2);x.fill();
+  x.fillStyle="#b8860b";x.font="bold 30px sans-serif";x.textAlign="center";x.textBaseline="middle";x.fillText("$",32,34);
+  return new Texture({source:new ImageSource({resource:cv})});
+}
+class Particles{
+  constructor(parent,max=320){
+    this.tex=coinTexture();this.items=[];
+    for(let i=0;i<max;i++){const s=new Sprite(this.tex);s.anchor.set(.5);s.visible=false;s.width=s.height=16;parent.addChild(s);
+      this.items.push({s,active:false,x:0,y:0,vx:0,vy:0,life:0,max:1,vr:0});}
+  }
+  burst(x,y,count,power=1){let n=0;for(const p of this.items){if(p.active)continue;
+    const a=-Math.PI/2+(Math.random()-.5)*1.9,sp=(200+Math.random()*340)*power;
+    p.active=true;p.x=x;p.y=y;p.vx=Math.cos(a)*sp;p.vy=Math.sin(a)*sp;
+    p.life=p.max=.7+Math.random()*.7;p.vr=(Math.random()-.5)*14;p.s.visible=true;
+    const z=10+Math.random()*10;p.s.width=p.s.height=z;
+    if(++n>=count)break;}}
+  update(dt){for(const p of this.items){if(!p.active)continue;p.vy+=900*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;
+    p.life-=dt;p.s.x=p.x;p.s.y=p.y;p.s.rotation+=p.vr*dt;p.s.alpha=Math.min(1,p.life/(p.max*.4));
+    if(p.life<=0){p.active=false;p.s.visible=false;}}}
+}
+
+/* ============================ 8. 場景搭建 ============================ */
+const W=900,H=600;
+const scene=new Container();app.stage.addChild(scene);
+
+// 背景光暈（BlurFilter 示範）
+const bloom=new Graphics().roundRect(150,70,600,330,30).fill({color:0xffcc00,alpha:.55});
+bloom.filters=[new BlurFilter({strength:26,quality:3})];bloom.visible=false;scene.addChild(bloom);
+
+// 機台框
+scene.addChild(new Graphics().roundRect(126,76,648,358,20).fill({color:0x000000,alpha:.45}));
+scene.addChild(new Graphics().roundRect(126,76,648,358,20).stroke({width:2,color:0xffd700,alpha:.6}));
+
+const reelW=190,gap=24,reelTop=92,reelH=326,symH=reelH/3,startX=(W-(reelW*3+gap*2))/2,centerY=reelTop+reelH/2;
+const reels=[];
+for(let i=0;i<3;i++){
+  const c=new Container();c.x=startX+i*(reelW+gap);c.y=reelTop;scene.addChild(c);
+  const mask=new Graphics().rect(0,0,reelW,reelH).fill(0xffffff);c.addChild(mask);c.mask=mask;
+  const sprites=[];for(let k=0;k<7;k++){const s=new Sprite(atlas[0]);s.anchor.set(.5);s.x=reelW/2;s.width=reelW-8;s.height=symH-8;c.addChild(s);sprites.push(s);}
+  // 上下暗角
+  const shade=new Graphics().rect(0,0,reelW,70).fill({color:0x000000,alpha:.85}).rect(0,reelH-70,reelW,70).fill({color:0x000000,alpha:.85});c.addChild(shade);
+  reels.push({c,sprites,pos:0,speed:0,spinning:false,stopping:false,stopped:false,stopFrom:0,stopTo:0,stopStart:0,stopDuration:0,targetSym:0,stopAt:0,scheduled:false,audioStop:false});
+}
+// 支付線（用短矩形模擬虛線）
+const line=new Graphics();for(let x=startX-6;x<startX+reelW*3+gap*2+6;x+=14)line.rect(x,centerY-1,8,2).fill({color:0xffd700,alpha:.9});scene.addChild(line);
+
+const hintText=new Text({text:"準備好了 · 按下 SPIN",style:{fontFamily:"Arial",fontSize:18,fill:0xffffff}});
+hintText.anchor.set(.5);hintText.x=W/2;hintText.y=48;scene.addChild(hintText);
+
+const winText=new Text({text:"BIG WIN!",style:{fontFamily:"Arial",fontSize:72,fontWeight:"900",fill:0xffd700,stroke:{color:0x5a2a00,width:10}}});
+winText.anchor.set(.5);winText.x=W/2;winText.y=505;winText.visible=false;winText.filters=[textGlow];scene.addChild(winText);
+
+const particles=new Particles(scene);
+
+// 中獎時讓整組捲軸發光（filter 掛在 container）
+const reelLayer=new Container();
+reels.forEach(r=>{scene.removeChild(r.c);reelLayer.addChild(r.c);});
+scene.addChildAt(reelLayer,3);
+reelLayer.filters=[reelGlow]; // 各自的 filter 實例，避免共用狀態衝突
+
+/* ============================ 9. FSM + GameLoop ============================ */
+const STATE={IDLE:"IDLE",REQUESTING:"REQUESTING",SPINNING:"SPINNING",STOPPING:"STOPPING",WIN:"WIN_PRESENTATION"};
+const $=id=>document.getElementById(id);
+const ui={balance:$("balance"),bet:$("bet"),win:$("win"),spin:$("spin"),down:$("betDown"),up:$("betUp")};
+
+class SlotGame{
+  constructor(){
+    this.audio=new AudioManager();this.state=STATE.IDLE;this.balance=1000;this.bet=10;this.winAmount=0;
+    this.result=null;this.now=0;this.spinStart=0;this.winStart=0;this.shake=0;this.acc=0;this.last=performance.now();
+    ui.down.onclick=()=>{if(this.state===STATE.IDLE){this.bet=Math.max(1,this.bet-1);this.sync();}};
+    ui.up.onclick=()=>{if(this.state===STATE.IDLE){this.bet=Math.min(100,this.bet+1);this.sync();}};
+    ui.spin.onclick=()=>this.spin();this.sync();
+    // 背景分頁時暫停渲染，省電並避免回到前台的 dt 暴衝
+    document.addEventListener("visibilitychange",()=>document.hidden?app.ticker.stop():app.ticker.start());
+    app.ticker.add(t=>this.tick(Math.min(t.deltaMS/1000,.1)));
+  }
+  sync(){ui.balance.textContent=this.balance;ui.bet.textContent=this.bet;ui.win.textContent=this.winAmount;ui.spin.disabled=this.state!==STATE.IDLE;}
+  setState(s){this.state=s;this.sync();}
+  requestServerResult(){return new Promise(r=>setTimeout(()=>r({reels:[0,1,2].map(()=>Math.floor(Math.random()*N)),roundId:"R"+Date.now()}),180+Math.random()*300));}
+  async spin(){
+    if(this.state!==STATE.IDLE||this.balance<this.bet)return;
+    this.balance-=this.bet;this.winAmount=0;this.sync();this.setState(STATE.REQUESTING);this.audio.spin();
+    const res=await this.requestServerResult();
+    if(this.state!==STATE.REQUESTING)return; // 競態防護（重連作廢舊結果）
+    this.result=res;this.spinStart=this.now;reels.forEach(r=>{r.spinning=true;r.stopped=false;r.stopping=false;r.scheduled=false;r.speed=14+Math.random()*4;});
+    this.setState(STATE.SPINNING);
+  }
+  evaluate(idx){const[a,b,c]=idx;if(a===b&&b===c)return Math.round(SYMBOLS[a].payout*this.bet);
+    if(idx.filter(i=>i===2).length>=2)return 2*this.bet;return 0;}
+  update(dt){
+    this.now+=dt;particles.update(dt);
+    if(this.shake>0){this.shake=Math.max(0,this.shake-dt*28);scene.x=(Math.random()-.5)*this.shake;scene.y=(Math.random()-.5)*this.shake;}
+    else{scene.x=scene.y=0;}
+    // Glow 衰減
+    gu_set(Math.max(0,reelGlow.resources.glowUniforms.uniforms.uIntensity-dt*1.6));
+
+    switch(this.state){
+      case STATE.SPINNING:
+        reels.forEach(r=>this.moveReel(r,dt));
+        if(this.now-this.spinStart>.75){reels.forEach((r,i)=>{r.targetSym=this.result.reels[i];r.stopAt=this.now+i*.28;r.stopDuration=.45+i*.12;r.scheduled=true;});this.setState(STATE.STOPPING);}
+        break;
+      case STATE.STOPPING:
+        reels.forEach(r=>{
+          if(r.scheduled&&this.now>=r.stopAt&&!r.stopping){let T=Math.ceil(r.pos)+2*N;while(T%N!==r.targetSym)T++;
+            r.stopFrom=r.pos;r.stopTo=T;r.stopStart=this.now;r.stopping=true;r.spinning=false;r.scheduled=false;r.audioStop=true;}
+          this.moveReel(r,dt);
+          if(r.audioStop&&r.stopping){this.audio.stop();this.shake=5;r.audioStop=false;}
+        });
+        if(reels.every(r=>r.stopped)){const pay=this.evaluate(reels.map(r=>((Math.round(r.pos)%N)+N)%N));
+          if(pay>0)this.enterWin(pay);else this.setState(STATE.IDLE);}
+        break;
+      case STATE.WIN:
+        if(this.now-this.winStart>1.8){winText.visible=false;bloom.visible=false;this.setState(STATE.IDLE);}
+        break;
+    }
+    // 同步精靈（复用 sprite，不新建）
+    reels.forEach(r=>{const base=Math.floor(r.pos);for(let k=0;k<r.sprites.length;k++){
+      const idx=base-3+k,s=r.sprites[k];s.texture=atlas[((idx%N)+N)%N];
+      s.y=reelH/2+(idx-r.pos)*symH;s.visible=Math.abs(idx-r.pos)<2.4;}});
+  }
+  moveReel(r,dt){
+    if(r.spinning){r.pos+=r.speed*dt;if(r.pos>5000)r.pos-=2000;}
+    else if(r.stopping){const t=Math.min(1,(this.now-r.stopStart)/r.stopDuration),e=Ease.outBack(t);
+      r.pos=r.stopFrom+(r.stopTo-r.stopFrom)*e;if(t>=1){r.pos=r.stopTo;r.stopping=false;r.stopped=true;}}
+  }
+  enterWin(amount){
+    this.winAmount=amount;this.balance+=amount;this.sync();this.winStart=this.now;
+    const big=amount>=this.bet*30;winText.text=big?"BIG WIN!":"WIN "+amount;winText.visible=true;bloom.visible=true;
+    winText.scale.set(.01);gu_set(0);
+    if(big){this.audio.big();particles.burst(W/2,310,180,1.35);this.shake=16;}
+    else{this.audio.win();particles.burst(W/2,310,70,1);this.shake=8;}
+    gu_set(big?1:.7);this.setState(STATE.WIN);
+  }
+  tick(dt){
+    // winText 弹性进场
+    if(this.state===STATE.WIN){const t=Math.min(1,(this.now-this.winStart)/.6);winText.scale.set(Math.max(.01,Ease.outElastic(t)));
+      winText.alpha=Math.min(1,(1.8-(this.now-this.winStart))/.5);}
+    this.update(dt);
+  }
+}
+window.__g=new SlotGame();
+window.__slot={get state(){return window.__g.state;},game:window.__g,reels:()=>reels.map(r=>((Math.round(r.pos)%N)+N)%N)};
+})().catch(e=>{console.error("[INIT ERROR]",e);});
+</script>
+</body>
+</html>
