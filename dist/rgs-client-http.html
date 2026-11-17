@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>RGS HTTP Client — 串接真實後端（roundId / 重連 / settle）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;min-height:100vh;background:#080612;color:#eaeaea;font-family:monospace;padding:14px}
+  .panel{max-width:880px;margin:0 auto;display:grid;gap:10px}
+  h1{font-size:17px;color:#ffd700;margin:0}.sub{font-size:11px;opacity:.6;margin:0}
+  .card{background:rgba(255,255,255,.05);border:1px solid rgba(255,215,0,.25);border-radius:11px;padding:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .stat{flex:1;min-width:110px;background:#160b2e;border-radius:8px;padding:8px;text-align:center}
+  .stat b{display:block;font-size:21px;color:#ffd700}.stat span{font-size:10px;opacity:.6}
+  input{flex:1;min-width:160px;padding:8px;border-radius:7px;border:1px solid rgba(255,255,255,.2);background:#120a24;color:#fff;font:12px monospace}
+  button{border:none;border-radius:8px;padding:10px 14px;font-weight:700;background:linear-gradient(#ffe06a,#f5a623);color:#2a1400;cursor:pointer}
+  button.ghost{background:#2c1f4d;color:#fff}button:disabled{filter:grayscale(.8) brightness(.6)}
+  label{font-size:12px;display:flex;gap:5px;align-items:center}
+  #log{max-height:300px;overflow:auto;font:12px/1.7 monospace;background:#05020d;border-radius:8px;padding:10px;white-space:pre-wrap}
+  .ok{color:#7f7}.warn{color:#ffcc55}.err{color:#ff6b6b}.info{color:#8bb8ff}
+  .badge{display:inline-block;padding:3px 9px;border-radius:20px;background:#2c1f4d;font-size:12px;color:#ffd700}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="串接真實 RGS 後端的 HTTP 用戶端：下注、查局、重連與結算 API 呼叫完整實作。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/rgs-client-http.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/rgs-client-http.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/rgs-client-http.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="RGS HTTP Client — 串接真實後端（roundId / 重連 / settle）">
+<meta property="og:description" content="串接真實 RGS 後端的 HTTP 用戶端：下注、查局、重連與結算 API 呼叫完整實作。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/rgs-client-http.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="RGS HTTP Client — 串接真實後端（roundId / 重連 / settle）">
+<meta name="twitter:description" content="串接真實 RGS 後端的 HTTP 用戶端：下注、查局、重連與結算 API 呼叫完整實作。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div class="panel">
+  <div class="card">
+    <h1>RGS HTTP Client　<span class="badge" id="state">IDLE</span></h1>
+    <p class="sub">請先啟動後端：cd rgs-server && npm install && node server.js</p>
+    <div class="row"><input id="base" value="http://localhost:8787/api/v1"><input id="pid" value="demo" style="flex:0 0 90px"></div>
+    <div class="row" style="margin-top:8px">
+      <div class="stat"><span>餘額（伺服器）</span><b id="bal">—</b></div>
+      <div class="stat"><span>注額</span><b id="bet">10</b></div>
+      <div class="stat"><span>贏分</span><b id="win">0</b></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" id="down">－</button><button id="spin">SPIN 下注</button><button class="ghost" id="up">＋</button>
+      <button class="ghost" id="resume">查局 RESUME</button>
+      <label><input type="checkbox" id="offline"> 模擬回傳遺失</label>
+    </div>
+    <p class="sub" id="roundInfo">roundId：—</p>
+  </div>
+  <div class="card"><div id="log"></div></div>
+</div>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const BASE=()=>$("base").value.replace(/\/+$/,"");
+const PID=()=>$("pid").value||"demo";
+function log(m,c="info"){const e=$("log");e.innerHTML+=`<span class="${c}">[${new Date().toLocaleTimeString()}] ${m}</span>\n`;e.scrollTop=e.scrollHeight;}
+
+/* ---------- HTTP 層（所有請求帶 roundId / Authorization） ---------- */
+async function request(path,{method="GET",body=null,roundId=null}={}){
+  const headers={"Authorization":"Bearer "+PID()};
+  if(body){headers["Content-Type"]="application/json";}
+  if(roundId)headers["Idempotency-Key"]=roundId;
+  const res=await fetch(BASE()+path,{method,headers,body:body?JSON.stringify(body):undefined});
+  // 模擬「伺服器已處理但回傳遺失」
+  if($("offline").checked&&path==="/rounds")throw new Error("RESPONSE_LOST");
+  if(res.status===202)return{__PENDING:true,status:"PENDING"};
+  if(!res.ok){let d={};try{d=await res.json();}catch(_){}throw new Error("HTTP_"+res.status+" "+(d.error||""));}
+  return res.json();
+}
+const api={
+  session:()=>request("/session"),
+  create:o=>request("/rounds",{method:"POST",body:o,roundId:o.roundId}),
+  get:id=>request("/rounds/"+encodeURIComponent(id)),
+  settle:id=>request("/rounds/"+encodeURIComponent(id)+"/settle",{method:"POST",body:{roundId:id},roundId:id})
+};
+
+/* ---------- RGS Client（與 rgs-integration.md 同一套邏輯） ---------- */
+class RGSClient{
+  constructor(onState){this.onState=onState;}
+  async play(bet){
+    const roundId=crypto.randomUUID();
+    const nonce=crypto.randomUUID().slice(0,8);
+    sessionStorage.setItem("pendingRound",JSON.stringify({roundId,bet}));
+    log(`POST /rounds roundId=${roundId.slice(0,10)}…`,"info");
+    try{const r=await api.create({roundId,betAmount:bet,nonce});log("收到伺服器結果","ok");return this._finalize(r);}
+    catch(e){log(`失敗：${e.message} → RECONNECTING`,"err");this.onState("RECONNECTING");return this.resume(roundId);}
+  }
+  async resume(roundId){
+    const delays=[300,600,1200,2400,4800,8000];
+    for(const d of delays){
+      log(`GET /rounds/${roundId.slice(0,8)}… 等待 ${d}ms`,"warn");
+      await sleep(d+Math.random()*200);
+      try{
+        const r=await api.get(roundId);
+        if(r.__PENDING){log("PENDING，續輪詢","warn");continue;}
+        log("查得既有結果 → 直接還原演出","ok");return this._finalize(r);
+      }catch(e){log("重試失敗，繼續…","err");}
+    }
+    throw new Error("RECONNECT_FAILED:"+roundId);
+  }
+  _finalize(r){sessionStorage.removeItem("pendingRound");api.settle(r.roundId).then(()=>log("settle 完成","ok")).catch(()=>log("settle 失敗，伺服器補帳","warn"));return r;}
+  bootstrap(){const p=JSON.parse(sessionStorage.getItem("pendingRound")||"null");
+    if(!p)return null;log(`偵測未完成局 ${p.roundId.slice(0,8)}… → 自動重連`,"warn");return this.resume(p.roundId);}
+}
+
+/* ---------- UI ---------- */
+const ST={IDLE:"IDLE",REQUESTING:"REQUESTING",RECONNECTING:"RECONNECTING",RESULT:"RESULT"};
+let state=ST.IDLE,bet=10;
+const rgs=new RGSClient(s=>setState(s));
+function setState(s){state=s;$("state").textContent=s;$("spin").disabled=s!==ST.IDLE;$("resume").disabled=s!==ST.IDLE;}
+async function refresh(){
+  try{const s=await api.session();$("bal").textContent=s.balance;}
+  catch(e){$("bal").textContent="離線";log("無法連線後端："+e.message,"err");}
+}
+async function spin(){
+  if(state!==ST.IDLE)return;
+  setState(ST.REQUESTING);
+  try{
+    const r=await rgs.play(bet);
+    setState(ST.RESULT);
+    $("bal").textContent=r.balanceAfter;$("win").textContent=r.outcome.winAmount;
+    $("roundInfo").textContent=`roundId：${r.roundId}　reels：${r.outcome.reels.join(",")}　hash：${r.serverSeedHash.slice(0,16)}…`;
+    log(`結果 reels=${r.outcome.reels.join(",")} win=${r.outcome.winAmount}`,"ok");
+    await sleep(900);setState(ST.IDLE);
+  }catch(e){log(`重連耗盡：${e.message}，保留 roundId 聯絡客服`,"err");setState(ST.IDLE);}
+}
+$("spin").onclick=spin;
+$("down").onclick=()=>{if(state===ST.IDLE){bet=Math.max(1,bet-1);$("bet").textContent=bet;}};
+$("up").onclick=()=>{if(state===ST.IDLE){bet=Math.min(100,bet+1);$("bet").textContent=bet;}};
+$("resume").onclick=async()=>{
+  const p=JSON.parse(sessionStorage.getItem("pendingRound")||"null");
+  if(!p){log("沒有未完成的局","warn");return;}
+  try{const r=await rgs.resume(p.roundId);$("bal").textContent=r.balanceAfter;$("win").textContent=r.outcome.winAmount;}
+  catch(e){log(e.message,"err");}
+};
+refresh();
+Promise.resolve(rgs.bootstrap()).then(r=>{if(r){$("bal").textContent=r.balanceAfter;$("win").textContent=r.outcome.winAmount;}}).catch(()=>{});
+log("就緒。勾選「模擬回傳遺失」後按 SPIN，可觀察真實後端的重連流程。","info");
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"RGS HTTP Client — 串接真實後端（roundId / 重連 / settle）","description":"串接真實 RGS 後端的 HTTP 用戶端：下注、查局、重連與結算 API 呼叫完整實作。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/rgs-client-http.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
