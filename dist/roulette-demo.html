@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>輪盤 — 共用引擎版（FSM / GameLoop / Particle）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:radial-gradient(circle at 50% 15%,#1a2a1c,#070d08 60%,#030503);color:#fff;
+    font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;padding:6px}
+  #hud,#ctrl{width:min(96vw,900px);display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+  .stat{flex:1;min-width:80px;background:rgba(0,0,0,.42);border:1px solid rgba(120,220,150,.3);border-radius:9px;padding:5px 8px;text-align:center}
+  .stat b{display:block;font-size:19px;color:#8ef0a8}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(96vw,900px);aspect-ratio:16/9;border-radius:14px;overflow:hidden;box-shadow:0 12px 34px rgba(0,0,0,.7)}
+  #stage canvas{width:100%;height:100%;display:block}
+  #ctrl button{border:none;border-radius:8px;padding:9px 6px;font-weight:700;font-size:12px;color:#fff;
+    background:linear-gradient(#2f7f57,#14532f);box-shadow:0 3px 0 #0a3018;cursor:pointer;flex:1;min-width:64px}
+  #ctrl button.on{color:#2a1400;background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 3px 0 #a86a00}
+  button:active{transform:translateY(2px)}button:disabled{filter:grayscale(.7) brightness(.6)}
+  input{width:58px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.25);background:#122017;color:#fff;text-align:center;font-size:14px}
+  #hint{width:min(96vw,900px);font-size:10px;opacity:.55;text-align:center}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="輪盤遊戲範例：37 格歐式輪盤、easeOutQuint 減速、球體彈跳、直注與紅黑單雙投注結算。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/roulette-demo.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/roulette-demo.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/roulette-demo.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="輪盤 — 共用引擎版（FSM / GameLoop / Particle）">
+<meta property="og:description" content="輪盤遊戲範例：37 格歐式輪盤、easeOutQuint 減速、球體彈跳、直注與紅黑單雙投注結算。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/roulette-demo.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="輪盤 — 共用引擎版（FSM / GameLoop / Particle）">
+<meta name="twitter:description" content="輪盤遊戲範例：37 格歐式輪盤、easeOutQuint 減速、球體彈跳、直注與紅黑單雙投注結算。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額</span><b id="bal">1000</b></div>
+    <div class="stat"><span>注額</span><b id="bet">10</b></div>
+    <div class="stat"><span>結果</span><b id="res" style="font-size:15px">—</b></div>
+    <div class="stat"><span>FSM</span><b id="status" style="font-size:13px">IDLE</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <input id="num" type="number" min="0" max="36" value="7">
+    <button data-b="straight" class="on">直注 35:1</button>
+    <button data-b="red">紅 1:1</button><button data-b="black">黑 1:1</button>
+    <button data-b="odd">單 1:1</button><button data-b="even">雙 1:1</button>
+    <button id="spin">旋轉 SPIN</button>
+  </div>
+  <div id="hint">共用引擎：FSM 控管旋轉週期、ParticleSystem 播放中獎金幣　·　0 綠色不通紅黑單雙　·　點一下解鎖音效</div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function () {
+  const { Ease, FSM, AudioManager, ParticleSystem, GameLoop, Stage } = Engine;
+  const $ = id => document.getElementById(id);
+
+  const stage = new Stage($("game"));
+  const audio = new AudioManager(.22)
+    .define("tick", { freq: 900, dur: .03, type: "square", vol: .06 })
+    .define("win",  { seq: [523, 659, 784, 1047], dur: .25, type: "triangle", vol: .18, gap: 70 })
+    .define("lose", { freq: 180, dur: .25, type: "sine", vol: .1, to: 120 });
+  const particles = new ParticleSystem(stage.ctx, 300);
+
+  const fsm = new FSM("IDLE", { IDLE: ["SPINNING"], SPINNING: ["RESULT"], RESULT: ["IDLE"] }, (prev, next) => {
+    $("status").textContent = next;
+    $("spin").disabled = next !== "IDLE";
+    document.querySelectorAll("#ctrl button[data-b]").forEach(b => b.disabled = next !== "IDLE");
+    $("num").disabled = next !== "IDLE";
+  });
+
+  const RED = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
+  const colorOf = n => n === 0 ? "#2e9e4f" : (RED.has(n) ? "#d4303c" : "#14181c");
+  const N = 37, STEP = Math.PI * 2 / N;
+
+  let bal = 1000, bet = 10, choice = "straight", winNum = 0;
+  let rotation = 0, startRot = 0, targetRot = 0, spinT = 0, spinDur = 4.2;
+  let ballJump = 0, flash = 0, lastTick = -1, resultWait = 0, now = 0;
+
+  function sync() { $("bal").textContent = bal; $("bet").textContent = bet; }
+  function startSpin() {
+    if (!fsm.is("IDLE") || bal < bet) return;
+    const v = parseInt($("num").value, 10);
+    if (choice === "straight" && (!Number.isInteger(v) || v < 0 || v > 36)) return;
+    bal -= bet; sync(); fsm.set("SPINNING");
+    winNum = Math.floor(Math.random() * N); // 伺服器 RNG（此處模擬）
+    const base = -Math.PI / 2 - winNum * STEP;
+    startRot = rotation;
+    targetRot = base + Math.ceil((rotation - base + Math.PI * 2 * 8) / (Math.PI * 2)) * Math.PI * 2;
+    if (targetRot <= rotation) targetRot += Math.PI * 2;
+    spinT = 0; lastTick = -1; ballJump = 1;
+  }
+  function payout() {
+    if (choice === "straight") return parseInt($("num").value, 10) === winNum ? bet * 36 : 0;
+    if (winNum === 0) return 0;
+    if (choice === "red") return RED.has(winNum) ? bet * 2 : 0;
+    if (choice === "black") return !RED.has(winNum) ? bet * 2 : 0;
+    if (choice === "odd") return winNum % 2 === 1 ? bet * 2 : 0;
+    if (choice === "even") return winNum % 2 === 0 ? bet * 2 : 0;
+    return 0;
+  }
+  function update(dt) {
+    now += dt; if (flash > 0) flash -= dt;
+    if (fsm.is("SPINNING")) {
+      spinT += dt;
+      const p = Math.min(1, spinT / spinDur), e = Ease.outQuint(p);
+      rotation = startRot + (targetRot - startRot) * e;
+      const slot = Math.floor(rotation / STEP) % N;
+      if (slot !== lastTick && p < .92) { lastTick = slot; audio.play("tick"); }
+      ballJump = Math.max(0, ballJump - dt * .55);
+      if (p >= 1) {
+        rotation = targetRot; fsm.set("RESULT");
+        const pay = payout();
+        if (pay > 0) {
+          bal += pay; audio.play("win"); flash = .6;
+          particles.burst(stage.w * .34, stage.h * .2, 130, { colors: ["#ffe06a", "#8ef0a8", "#7ef0ff"], power: 1.3, life: 1, shape: 1 });
+        } else audio.play("lose");
+        sync();
+        const col = winNum === 0 ? " 綠" : (RED.has(winNum) ? " 紅" : " 黑");
+        $("res").textContent = winNum + col + (pay ? " +" + pay : " -" + bet);
+        resultWait = 2;
+      }
+    } else if (fsm.is("RESULT")) {
+      resultWait -= dt; if (resultWait <= 0) fsm.set("IDLE");
+    }
+    particles.update(dt);
+  }
+  function render() {
+    const c = stage.begin(), W = stage.w, H = stage.h;
+    c.fillStyle = "#07120b"; c.fillRect(0, 0, W, H);
+    if (flash > 0) { c.fillStyle = `rgba(255,220,100,${flash * .22})`; c.fillRect(0, 0, W, H); }
+    const cx = W * .34, cy = H * .52, R = Math.min(H * .38, W * .26);
+    c.fillStyle = "#3a2312"; c.beginPath(); c.arc(cx, cy, R + 16, 0, 6.283); c.fill();
+    c.strokeStyle = "#b8860b"; c.lineWidth = 4; c.stroke();
+    c.save(); c.translate(cx, cy); c.rotate(rotation);
+    for (let i = 0; i < N; i++) {
+      const a0 = i * STEP - STEP / 2, a1 = i * STEP + STEP / 2;
+      c.fillStyle = colorOf(i); c.beginPath(); c.moveTo(0, 0); c.arc(0, 0, R, a0, a1); c.closePath(); c.fill();
+      c.strokeStyle = "rgba(255,255,255,.18)"; c.lineWidth = 1; c.stroke();
+      c.save(); c.rotate(i * STEP); c.fillStyle = "#fff"; c.font = `bold ${Math.max(9, R * .07)}px sans-serif`;
+      c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(String(i), R * .78, 0); c.restore();
+    }
+    c.fillStyle = "#c9a227"; c.beginPath(); c.arc(0, 0, R * .22, 0, 6.283); c.fill();
+    c.fillStyle = "#3a2312"; c.beginPath(); c.arc(0, 0, R * .17, 0, 6.283); c.fill();
+    c.restore();
+    const bx = cx, by = cy - R * .86 + ballJump * Math.sin(now * 22) * 8;
+    c.fillStyle = "#fff"; c.shadowColor = "#fff"; c.shadowBlur = 12;
+    c.beginPath(); c.arc(bx, by, Math.max(5, R * .045), 0, 6.283); c.fill(); c.shadowBlur = 0;
+    c.fillStyle = "#ffe06a"; c.beginPath(); c.moveTo(cx, cy - R - 30); c.lineTo(cx - 8, cy - R - 14); c.lineTo(cx + 8, cy - R - 14); c.closePath(); c.fill();
+
+    const px = W * .64, py = H * .14, pw = W * .30, ph = H * .72;
+    c.fillStyle = "rgba(0,0,0,.35)"; c.beginPath(); c.roundRect(px, py, pw, ph, 14); c.fill();
+    c.fillStyle = "rgba(255,255,255,.85)"; c.font = "bold 15px sans-serif"; c.textAlign = "center";
+    c.fillText("下注面板 BETTING", px + pw / 2, py + 26);
+    const opts = [{ k: "red", t: "紅 RED", c: "#d4303c" }, { k: "black", t: "黑 BLACK", c: "#222" },
+      { k: "odd", t: "單 ODD", c: "#2f7fbf" }, { k: "even", t: "偶 EVEN", c: "#2f7fbf" }];
+    opts.forEach((o, i) => {
+      const x = px + 14 + (i % 2) * (pw - 28) / 2, y = py + 46 + Math.floor(i / 2) * 46;
+      c.fillStyle = o.c; c.beginPath(); c.roundRect(x, y, (pw - 34) / 2, 34, 7); c.fill();
+      if (choice === o.k) { c.strokeStyle = "#ffe06a"; c.lineWidth = 3; c.stroke(); }
+      c.fillStyle = "#fff"; c.font = "12px sans-serif"; c.fillText(o.t, x + (pw - 34) / 4, y + 21);
+    });
+    c.fillStyle = "#2e9e4f"; c.beginPath(); c.roundRect(px + 14, py + 150, pw - 28, 40, 7); c.fill();
+    if (choice === "straight") { c.strokeStyle = "#ffe06a"; c.lineWidth = 3; c.stroke(); }
+    c.fillStyle = "#fff"; c.font = "12px sans-serif"; c.fillText("直注 STRAIGHT 35:1", px + pw / 2, py + 175);
+    c.fillStyle = "rgba(255,255,255,.5)"; c.font = "11px sans-serif";
+    c.fillText("號碼：" + ($("num").value || "—"), px + pw / 2, py + 215);
+    if (fsm.is("RESULT")) { c.fillStyle = "#ffe06a"; c.font = "bold 20px sans-serif"; c.fillText("落點 " + winNum, px + pw / 2, py + 250); }
+    particles.draw();
+  }
+  const loop = new GameLoop({ update, render });
+  document.querySelectorAll("#ctrl button[data-b]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#ctrl button[data-b]").forEach(x => x.classList.remove("on"));
+    b.classList.add("on"); choice = b.dataset.b;
+  });
+  $("spin").onclick = startSpin;
+  sync(); loop.start();
+})();
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"輪盤 — 共用引擎版（FSM / GameLoop / Particle）","description":"輪盤遊戲範例：37 格歐式輪盤、easeOutQuint 減速、球體彈跳、直注與紅黑單雙投注結算。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/roulette-demo.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
