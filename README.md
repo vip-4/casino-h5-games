@@ -73,6 +73,17 @@ firebase use <FIREBASE_PROJECT_ID>
 firebase deploy --only hosting --project <FIREBASE_PROJECT_ID>
 ```
 
+### 部署到 Cloudflare R2（S3 相容）
+
+`deploy-r2.py` 使用 boto3 把 `dist/` 上傳到 R2，並自動帶入 Content-Type 與 Cache-Control。上傳前會把站內 canonical 網域改寫為 `SITE_URL`。
+
+GitHub Actions 設定：
+
+- **Variables**：`R2_ACCOUNT_ID`、`R2_BUCKET`、`R2_SITE_URL`（公開網址，例如 r2.dev alias 或自訂網域）
+- **Secrets**：`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
+
+> R2 bucket 預設私有。要對外提供網址，請在 Cloudflare Dashboard → R2 → Bucket → Settings → Public access 開啟 r2.dev，或綁定自訂網域。S3 API 不支援 `PutBucketPolicy`，因此腳本無法自行開啟公開讀取。
+
 ### Google 認證說明
 
 ```bash
