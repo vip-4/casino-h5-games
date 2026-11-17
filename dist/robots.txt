@@ -1,0 +1,33 @@
+User-agent: *
+Allow: /
+Disallow: /rgs-server/
+
+# 生成式引擎與 AI 爬蟲：允許抓取以利摘要與引用（GEO）
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+Sitemap: https://casino-h5-games.pages.dev/sitemap.xml
