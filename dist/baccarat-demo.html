@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>百家樂 — 共用引擎版（FSM / GameLoop / Particle）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:radial-gradient(circle at 50% 10%,#1d3a2a,#0a1710 60%,#040a06);color:#fff;
+    font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:6px}
+  #hud,#ctrl{width:min(96vw,1000px);display:flex;gap:8px;flex-wrap:wrap}
+  .stat{flex:1;min-width:88px;background:rgba(0,0,0,.4);border:1px solid rgba(120,220,150,.3);border-radius:10px;padding:6px 10px;text-align:center}
+  .stat b{display:block;font-size:20px;color:#8ef0a8}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(96vw,1000px);aspect-ratio:16/9;border-radius:14px;overflow:hidden;box-shadow:0 12px 36px rgba(0,0,0,.7)}
+  #stage canvas{width:100%;height:100%;display:block}
+  #ctrl button{border:none;border-radius:9px;padding:11px;font-weight:700;font-size:13px;color:#fff;
+    background:linear-gradient(#2f7f57,#14532f);box-shadow:0 4px 0 #0a3018;cursor:pointer;flex:1;min-width:82px}
+  #ctrl button.on{color:#2a1400;background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 4px 0 #a86a00}
+  button:active{transform:translateY(3px)}button:disabled{filter:grayscale(.7) brightness(.6)}
+  #hint{width:min(96vw,1000px);font-size:10px;opacity:.55;text-align:center}
+</style>
+<!-- ===== SEO / GEO 優化欄位 ===== -->
+<meta name="description" content="百家樂開發範例：8 副牌、標準補牌規則、發牌緩動動畫與 FSM 狀態管理，結果由伺服器 RNG 決定。">
+<meta name="keywords" content="H5博弈遊戲,HTML5 Canvas,PixiJS,老虎機,捕魚機,百家樂,輪盤,Crash崩盤,RGS API,Provably Fair,遊戲引擎,前端效能優化">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0418">
+<link rel="canonical" href="https://casino-h5-games.pages.dev/baccarat-demo.html">
+<link rel="alternate" hreflang="zh-Hant" href="https://casino-h5-games.pages.dev/baccarat-demo.html">
+<link rel="alternate" hreflang="x-default" href="https://casino-h5-games.pages.dev/baccarat-demo.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Casino H5 Games Lab">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:title" content="百家樂 — 共用引擎版（FSM / GameLoop / Particle）">
+<meta property="og:description" content="百家樂開發範例：8 副牌、標準補牌規則、發牌緩動動畫與 FSM 狀態管理，結果由伺服器 RNG 決定。">
+<meta property="og:url" content="https://casino-h5-games.pages.dev/baccarat-demo.html">
+<meta property="og:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="百家樂 — 共用引擎版（FSM / GameLoop / Particle）">
+<meta name="twitter:description" content="百家樂開發範例：8 副牌、標準補牌規則、發牌緩動動畫與 FSM 狀態管理，結果由伺服器 RNG 決定。">
+<meta name="twitter:image" content="https://casino-h5-games.pages.dev/og-image.svg">
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額</span><b id="bal">1000</b></div>
+    <div class="stat"><span>注額</span><b id="bet">10</b></div>
+    <div class="stat"><span>上一局</span><b id="last" style="font-size:15px">—</b></div>
+    <div class="stat"><span>FSM</span><b id="status" style="font-size:14px">IDLE</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <button data-b="player" class="on">閒家 1:1</button>
+    <button data-b="banker">莊家 0.95:1</button>
+    <button data-b="tie">和局 8:1</button>
+    <button id="deal">發牌 DEAL</button>
+  </div>
+  <div id="hint">共用引擎：FSM 管理 IDLE→DEALING→RESULT→IDLE　·　結果由伺服器 RNG + 標準補牌規則決定　·　點一下解鎖音效</div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function () {
+  const { FSM, AudioManager, ParticleSystem, GameLoop, Stage } = Engine;
+  const $ = id => document.getElementById(id);
+
+  const stage = new Stage($("game"));
+  const audio = new AudioManager(.25)
+    .define("card", { freq: 600, dur: .06, type: "triangle", vol: .12, to: 900 })
+    .define("win",  { seq: [523, 659, 784], dur: .25, type: "triangle", vol: .2, gap: 80 })
+    .define("lose", { freq: 200, dur: .3, type: "sine", vol: .12, to: 120 });
+  const particles = new ParticleSystem(stage.ctx, 300);
+
+  /* ---- FSM ---- */
+  const fsm = new FSM("IDLE", {
+    IDLE: ["DEALING"], DEALING: ["RESULT"], RESULT: ["IDLE"]
+  }, (prev, next) => {
+    $("status").textContent = next;
+    $("deal").disabled = next !== "IDLE";
+    document.querySelectorAll("#ctrl button[data-b]").forEach(b => b.disabled = next !== "IDLE");
+  });
+
+  /* ---- 伺服器端牌局規則 ---- */
+  const SUITS = ["♠", "♥", "♦", "♣"], RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+  function buildShoe() {
+    const a = [];
+    for (let d = 0; d < 8; d++) for (const s of SUITS) for (let i = 0; i < 13; i++)
+      a.push({ suit: s, rank: RANKS[i], value: i === 0 ? 1 : Math.min(i, 10) });
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+  let shoe = buildShoe();
+  function draw() { if (shoe.length < 60) shoe = buildShoe(); return shoe.pop(); }
+  const score = h => h.reduce((a, c) => a + c.value, 0) % 10;
+  function bankerDraws(b, p, third) {
+    if (p.length === 2) return score(b) <= 5;
+    const c = third.value, s = score(b);
+    if (s <= 2) return true; if (s === 3) return c !== 8; if (s === 4) return c < 5 || c > 8;
+    if (s === 5) return c < 4 || c > 8; if (s === 6) return c === 6 || c === 7; return false;
+  }
+  function serverDeal() {
+    let p = [draw(), draw()], b = [draw(), draw()];
+    if (score(p) <= 5) { const c = draw(); p.push(c); if (bankerDraws(b, p, c)) b.push(draw()); }
+    else if (bankerDraws(b, p, null)) b.push(draw());
+    const ps = score(p), bs = score(b);
+    return { roundId: "B" + Date.now(), player: p, banker: b, ps, bs,
+      outcome: ps === bs ? "tie" : (ps > bs ? "player" : "banker") };
+  }
+
+  let bal = 1000, bet = 10, choice = "player", result = null, now = 0;
+  let anims = [], dealIndex = 0, dealTimer = 0, flash = 0, resultWait = 0;
+
+  function sync() { $("bal").textContent = bal; $("bet").textContent = bet; }
+  function startDeal() {
+    if (!fsm.is("IDLE") || bal < bet) return;
+    bal -= bet; sync(); fsm.set("DEALING");
+    result = serverDeal(); anims = []; dealIndex = 0; dealTimer = .25; flash = 0;
+    [...result.player.map((c, i) => ({ c, side: "player", i })),
+     ...result.banker.map((c, i) => ({ c, side: "banker", i }))]
+      .forEach((o, k) => anims.push({ ...o, t: -k * .18, x: stage.w / 2 - 30, y: -80, rot: 0 }));
+  }
+  function payout() {
+    const o = result.outcome;
+    if (o !== choice) return 0;
+    if (o === "tie") return Math.round(bet * 8);
+    if (o === "banker") return Math.round(bet * 1.95);
+    return bet * 2;
+  }
+
+  function update(dt) {
+    now += dt; if (flash > 0) flash -= dt;
+    if (fsm.is("DEALING")) {
+      dealTimer -= dt;
+      if (dealTimer <= 0 && dealIndex < anims.length) { anims[dealIndex].t = 0; audio.play("card"); dealIndex++; dealTimer = .19; }
+      let allDone = true;
+      for (const a of anims) {
+        if (a.t < 0) continue;
+        a.t = Math.min(1, a.t + dt * 2.2);
+        const e = 1 - Math.pow(1 - a.t, 3);
+        const tx = (a.side === "player" ? stage.w * .30 : stage.w * .70) + a.i * 58;
+        const ty = stage.h * .40;
+        a.x = stage.w / 2 + (tx - stage.w / 2) * e;
+        a.y = -80 + (ty + 80) * e;
+        a.rot = (1 - e) * (a.side === "player" ? .3 : -.3);
+        if (a.t < 1) allDone = false;
+      }
+      if (allDone && dealIndex >= anims.length && anims.every(a => a.t >= 1)) {
+        fsm.set("RESULT");
+        const pay = payout();
+        if (pay > 0) { bal += pay; audio.play("win"); flash = .5;
+          particles.burst(stage.w / 2, stage.h * .3, 120, { colors: ["#ffe06a", "#8ef0a8"], power: 1.2, life: .9, shape: 1 });
+        } else audio.play("lose");
+        sync();
+        $("last").textContent = (result.outcome === "tie" ? "和局" : result.outcome === "player" ? "閒勝" : "莊勝") + (pay > 0 ? " +" + pay : " -" + bet);
+        resultWait = 1.8;
+      }
+    } else if (fsm.is("RESULT")) {
+      resultWait -= dt;
+      if (resultWait <= 0) fsm.set("IDLE");
+    }
+    particles.update(dt);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    const c = stage.ctx;
+    c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+  }
+  function drawCard(x, y, w, h, c0, rot) {
+    const c = stage.ctx;
+    c.save(); c.translate(x, y); c.rotate(rot || 0);
+    c.fillStyle = "rgba(0,0,0,.35)"; roundRect(-w / 2 + 4, -h / 2 + 6, w, h, 8); c.fill();
+    c.fillStyle = "#fff"; roundRect(-w / 2, -h / 2, w, h, 8); c.fill();
+    const red = c0.suit === "♥" || c0.suit === "♦";
+    c.fillStyle = red ? "#e0343c" : "#1a1a1a";
+    c.font = "bold 20px sans-serif"; c.textAlign = "left"; c.textBaseline = "top"; c.fillText(c0.rank, -w / 2 + 8, -h / 2 + 6);
+    c.font = "20px sans-serif"; c.fillText(c0.suit, -w / 2 + 8, -h / 2 + 28);
+    c.textAlign = "right"; c.textBaseline = "bottom"; c.fillText(c0.rank, w / 2 - 8, h / 2 - 6);
+    c.font = "34px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(c0.suit, 0, 4);
+    c.restore();
+  }
+  function render() {
+    const c = stage.begin(), W = stage.w, H = stage.h;
+    const g = c.createRadialGradient(W / 2, H * .35, 40, W / 2, H * .35, W * .7);
+    g.addColorStop(0, "#1c6642"); g.addColorStop(1, "#082716");
+    c.fillStyle = g; c.fillRect(0, 0, W, H);
+    if (flash > 0) { c.fillStyle = `rgba(255,220,100,${flash * .25})`; c.fillRect(0, 0, W, H); }
+    c.strokeStyle = "rgba(255,255,255,.15)"; c.lineWidth = 2;
+    c.beginPath(); c.ellipse(W / 2, H * .52, W * .42, H * .34, 0, 0, 6.283); c.stroke();
+    c.textAlign = "center"; c.fillStyle = "rgba(255,255,255,.85)"; c.font = "bold 16px sans-serif";
+    c.fillText("BANKER 莊家", W * .7, H * .18); c.fillText("PLAYER 閒家", W * .3, H * .18);
+    for (const a of anims) if (a.t >= 0) drawCard(a.x, a.y, 64, 88, a.c, a.rot);
+    if (fsm.is("RESULT") || (fsm.is("DEALING") && dealIndex >= anims.length)) {
+      c.font = "bold 34px sans-serif";
+      c.fillStyle = result.ps > result.bs ? "#ffe06a" : "#fff"; c.fillText(result.ps, W * .3, H * .72);
+      c.fillStyle = result.bs > result.ps ? "#ffe06a" : "#fff"; c.fillText(result.bs, W * .7, H * .72);
+    }
+    if (fsm.is("RESULT")) {
+      const txt = result.outcome === "tie" ? "TIE 和局" : result.outcome === "player" ? "PLAYER WIN 閒勝" : "BANKER WIN 莊勝";
+      c.font = "bold 40px sans-serif"; c.fillStyle = "#ffe06a"; c.shadowColor = "#ffcc00"; c.shadowBlur = 20;
+      c.fillText(txt, W / 2, H * .26); c.shadowBlur = 0;
+    }
+    if (fsm.is("IDLE")) { c.fillStyle = "rgba(255,255,255,.45)"; c.font = "18px sans-serif"; c.fillText("選擇投注標的後按發牌", W / 2, H * .5); }
+    particles.draw();
+  }
+  const loop = new GameLoop({ update, render });
+  document.querySelectorAll("#ctrl button[data-b]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#ctrl button[data-b]").forEach(x => x.classList.remove("on"));
+    b.classList.add("on"); choice = b.dataset.b;
+  });
+  $("deal").onclick = startDeal;
+  sync(); loop.start();
+})();
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"百家樂 — 共用引擎版（FSM / GameLoop / Particle）","description":"百家樂開發範例：8 副牌、標準補牌規則、發牌緩動動畫與 FSM 狀態管理，結果由伺服器 RNG 決定。","applicationCategory":"GameApplication","operatingSystem":"Web Browser","url":"https://casino-h5-games.pages.dev/baccarat-demo.html","inLanguage":"zh-Hant","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD"}}</script>
+</body>
+</html>
