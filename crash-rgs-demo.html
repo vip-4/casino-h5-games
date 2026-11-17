@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Crash + RGS — 共用引擎版（engine.js）</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:radial-gradient(circle at 50% 10%,#12203a,#070b16 60%,#03050c);color:#fff;
+    font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:6px}
+  #hud,#ctrl{width:min(96vw,960px);display:flex;gap:8px;flex-wrap:wrap}
+  .stat{flex:1;min-width:88px;background:rgba(0,0,0,.42);border:1px solid rgba(80,200,255,.25);border-radius:10px;padding:5px 8px;text-align:center}
+  .stat b{display:block;font-size:20px;color:#5ee0ff}.stat span{font-size:10px;opacity:.6}
+  #stage{width:min(96vw,960px);aspect-ratio:8/4.2;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.6)}
+  #stage canvas{width:100%;height:100%;display:block}
+  #ctrl button{border:none;border-radius:9px;padding:10px 8px;font-weight:700;font-size:13px;color:#05202b;
+    background:linear-gradient(#7ef0ff,#26a9d6);box-shadow:0 4px 0 #0d6a8c;cursor:pointer;flex:1;min-width:82px}
+  #ctrl button:active{transform:translateY(3px);box-shadow:0 1px 0 #0d6a8c}
+  #ctrl button.ghost{color:#fff;background:linear-gradient(#3a4a70,#202b48);box-shadow:0 4px 0 #101728}
+  #ctrl button.cash{color:#2a1400;background:linear-gradient(#ffe06a,#f5a623);box-shadow:0 4px 0 #a86a00}
+  button:disabled{filter:grayscale(.85) brightness(.55);cursor:default}
+  label{font-size:12px;display:flex;align-items:center;gap:5px}
+  #log{width:min(96vw,960px);height:64px;overflow:auto;background:#05020d;border-radius:8px;padding:6px 9px;font:11px/1.6 monospace;white-space:pre-wrap}
+  .ok{color:#7f7}.warn{color:#ffcc55}.err{color:#ff6b6b}.info{color:#8bb8ff}
+  #fair{width:min(96vw,960px);font-size:10px;opacity:.55;word-break:break-all}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat"><span>餘額（伺服器）</span><b id="bal">1000</b></div>
+    <div class="stat"><span>注額</span><b id="bet">10</b></div>
+    <div class="stat"><span>倍數</span><b id="mult">1.00x</b></div>
+    <div class="stat"><span>FSM</span><b id="status" style="font-size:14px">IDLE</b></div>
+  </div>
+  <div id="stage"><canvas id="game"></canvas></div>
+  <div id="ctrl">
+    <button class="ghost" id="betDown">－</button><button id="betBtn">下注開始</button><button class="ghost" id="betUp">＋</button>
+    <button class="cash" id="cashBtn" disabled>立即兌現</button>
+    <label><input type="checkbox" id="offline"> 模擬斷線</label>
+  </div>
+  <div id="fair">ServerSeedHash：—</div>
+  <div id="log"></div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+(function () {
+  const { FSM, AudioManager, ParticleSystem, GameLoop, Stage } = Engine;
+  const $ = id => document.getElementById(id);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  /* ===== 共用模組 ===== */
+  const stage = new Stage($("game"));
+  const audio = new AudioManager(.3)
+    .define("tick",  { freq: 880, dur: .05, type: "square", vol: .12 })
+    .define("cash",  { seq: [659, 880], dur: .25, type: "triangle", vol: .3, gap: 70 })
+    .define("crash", { freq: 120, dur: .6, type: "sawtooth", vol: .35, to: 40 });
+  const particles = new ParticleSystem(stage.ctx, 300);
+
+  const fsm = new FSM("IDLE", {
+    IDLE:          ["BETTING", "RECONNECTING", "COUNTDOWN", "RUNNING", "CRASHED", "SETTLE"],
+    BETTING:       ["RECONNECTING", "COUNTDOWN", "RUNNING", "CRASHED", "SETTLE", "IDLE"],
+    RECONNECTING:  ["COUNTDOWN", "RUNNING", "CRASHED", "SETTLE", "IDLE"],
+    COUNTDOWN:     ["RUNNING", "IDLE"],
+    RUNNING:       ["CRASHED", "SETTLE", "RECONNECTING", "IDLE"],
+    CRASHED:       ["IDLE"],
+    SETTLE:        ["IDLE"]
+  }, (prev, next) => {
+    $("status").textContent = next;
+    $("betBtn").disabled = next !== "IDLE";
+    $("cashBtn").disabled = !fsm.is("RUNNING") || cashed || cashPending;
+    $("betDown").disabled = $("betUp").disabled = next !== "IDLE";
+  });
+
+  async function sha256(s) {
+    const b = new TextEncoder().encode(s);
+    const d = await crypto.subtle.digest("SHA-256", b);
+    return Array.from(new Uint8Array(d)).map(x => x.toString(16).padStart(2, "0")).join("");
+  }
+  function log(m, c = "info") { const e = $("log"); e.innerHTML += `<span class="${c}">[${new Date().toLocaleTimeString()}] ${m}</span>\n`; e.scrollTop = e.scrollHeight; }
+
+  /* ===== Mock RGS（伺服器端 RNG / 冪等 / 兌現驗證） ===== */
+  const MockRGS = {
+    key: "rgsCrashDB",
+    db() { return JSON.parse(localStorage.getItem(this.key) || '{"balance":1000,"rounds":{}}'); },
+    save(d) { localStorage.setItem(this.key, JSON.stringify(d)); },
+    off() { return $("offline").checked; },
+
+    async createRound({ roundId, bet, nonce }) {
+      await sleep(120 + Math.random() * 180);
+      const d = this.db();
+      if (d.rounds[roundId]) return structuredClone(d.rounds[roundId]); // 冪等
+      if (d.balance < bet) throw new Error("INSUFFICIENT_FUNDS");
+      const seed = crypto.randomUUID() + crypto.randomUUID();
+      const hash = await sha256(seed);
+      const r = parseInt(hash.slice(0, 8), 16) / 0xffffffff;
+      const crashMul = Math.max(1.01, 1 + 19 * Math.pow(r, 3.2));
+      const crashTime = 2.2 * Math.log2(crashMul) + .15;
+      d.balance -= bet;
+      const rec = { roundId, status: "RUNNING", bet, nonce, seed, hash, crashMul, crashTime,
+        startTs: Date.now() + 1600, cashout: null, payout: 0, settled: false, balanceAfter: d.balance };
+      d.rounds[roundId] = rec; this.save(d);
+      if (this.off()) throw new Error("RESPONSE_LOST");
+      return structuredClone(rec);
+    },
+    async cashout({ roundId, mult }) {
+      if (this.off()) throw new Error("NETWORK_OFFLINE");
+      await sleep(100);
+      const d = this.db(), rec = d.rounds[roundId];
+      if (!rec) throw new Error("ROUND_NOT_FOUND");
+      if (rec.cashout) return structuredClone(rec);
+      const elapsed = (Date.now() - rec.startTs) / 1000;
+      if (elapsed >= rec.crashTime) { rec.status = "CRASHED"; rec.payout = 0; this.save(d); return structuredClone(rec); }
+      if (mult > rec.crashMul + 1e-6) throw new Error("INVALID_MULTIPLIER"); // 防作弊
+      const payout = Math.round(rec.bet * mult * 100) / 100;
+      rec.cashout = { mult, payout }; rec.cashoutAt = Date.now();
+      rec.payout = payout; rec.status = "CASHED";
+      d.balance += payout; rec.balanceAfter = d.balance; rec.settled = true; this.save(d);
+      return structuredClone(rec);
+    },
+    async getRound(roundId) {
+      if (this.off()) throw new Error("NETWORK_OFFLINE");
+      await sleep(90);
+      const d = this.db(), rec = d.rounds[roundId];
+      if (!rec) return { roundId, status: "PENDING" };
+      const elapsed = (Date.now() - rec.startTs) / 1000;
+      if (!rec.cashout && elapsed >= rec.crashTime && rec.status !== "CRASHED") {
+        rec.status = "CRASHED"; rec.payout = 0; rec.settled = true; rec.balanceAfter = d.balance; this.save(d);
+      }
+      return structuredClone(rec);
+    },
+    async settle(roundId) {
+      const d = this.db(), rec = d.rounds[roundId];
+      if (rec && !rec.settled) { rec.settled = true; this.save(d); }
+      return { roundId, settled: true };
+    }
+  };
+
+  class RGSClient {
+    constructor() {}
+    async play(bet) {
+      const roundId = "C" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const nonce = crypto.randomUUID().slice(0, 8);
+      sessionStorage.setItem("pendingRound", JSON.stringify({ roundId, bet }));
+      log(`POST /rounds roundId=${roundId.slice(0, 10)}… bet=${bet}`, "info");
+      try { const r = await MockRGS.createRound({ roundId, bet, nonce }); log("收到 RNG 結果", "ok"); return this._finalize(r); }
+      catch (e) { log(`失敗：${e.message} → RECONNECTING`, "err"); if (fsm.can("RECONNECTING")) fsm.set("RECONNECTING"); return this.resume(roundId); }
+    }
+    async cashout(roundId, mult) {
+      log(`POST cashout mult=${mult.toFixed(2)}`, "info");
+      try { const r = await MockRGS.cashout({ roundId, mult }); log("伺服器接受兌現", "ok"); return this._finalize(r); }
+      catch (e) { log(`兌現失敗：${e.message} → RECONNECTING`, "err"); if (fsm.can("RECONNECTING")) fsm.set("RECONNECTING"); return this.resume(roundId); }
+    }
+    async resume(roundId) {
+      for (const d of [300, 600, 1200, 2400, 4800, 8000]) {
+        log(`GET /rounds/${roundId.slice(0, 8)}… 等待 ${d}ms`, "warn");
+        await sleep(d + Math.random() * 200);
+        try {
+          const r = await MockRGS.getRound(roundId);
+          if (r.status === "PENDING") { log("PENDING，續輪詢", "warn"); continue; }
+          log("查得既有局狀態 → 還原演出", "ok"); return this._finalize(r);
+        } catch (_) { log("重試失敗，繼續…", "err"); }
+      }
+      throw new Error("RECONNECT_FAILED:" + roundId);
+    }
+    _finalize(r) { sessionStorage.removeItem("pendingRound"); MockRGS.settle(r.roundId); return r; }
+    bootstrap() { const p = JSON.parse(sessionStorage.getItem("pendingRound") || "null");
+      if (!p) return null; log(`未完成局 ${p.roundId.slice(0, 8)}… → 自動重連`, "warn"); return this.resume(p.roundId); }
+  }
+  const rgs = new RGSClient();
+
+  /* ===== 遊戲狀態 ===== */
+  const ST = { IDLE: "IDLE", BETTING: "BETTING", RECONNECTING: "RECONNECTING", COUNTDOWN: "COUNTDOWN", RUNNING: "RUNNING", CRASHED: "CRASHED", SETTLE: "SETTLE" };
+  let bet = 10, round = null, t = 0, countdown = 0, mult = 1, cashed = false, payout = 0;
+  let shake = 0, crashAt = 0, cashPending = false, crashPending = false, now = 0;
+  const MAXP = 1400, px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+  let pn = 0;
+
+  function sync() { $("bal").textContent = round ? round.balanceAfter : MockRGS.db().balance; $("bet").textContent = bet; $("mult").textContent = mult.toFixed(2) + "x"; }
+  function curveY(m) { return stage.h * .86 - (Math.log2(Math.max(1, m)) / 5) * stage.h * .72; }
+  function rebuildCurve(elapsed) {
+    pn = 0;
+    const steps = Math.min(MAXP, Math.floor(elapsed * 60) + 1);
+    for (let i = 0; i < steps; i++) {
+      const tt = elapsed * i / Math.max(1, steps - 1);
+      px[pn] = 60 + (tt / 12) * (stage.w - 80); py[pn] = curveY(Math.pow(2, tt / 2.2)); pn++;
+    }
+  }
+  function applyRound(r, opts = {}) {
+    round = r; crashPending = false;
+    if (r.status === "CASHED") {
+      cashed = true; payout = r.payout; mult = r.cashout.mult;
+      const el = Math.max(0, ((r.cashoutAt || Date.now()) - r.startTs) / 1000);
+      rebuildCurve(Math.min(el, r.crashTime));
+      if (fsm.can("SETTLE")) fsm.set("SETTLE");
+      log(`還原：已兌現 ${payout}（${mult.toFixed(2)}x）`, "ok");
+    } else if (r.status === "CRASHED") {
+      cashed = false; payout = r.payout || 0; mult = r.crashMul; rebuildCurve(r.crashTime);
+      crashAt = now; shake = 16;
+      particles.burst(px[Math.max(0, pn - 1)] || stage.w * .7, py[Math.max(0, pn - 1)] || stage.h * .3,
+        140, { colors: ["#5ee0ff", "#ffe06a", "#ff5b6e"], power: 1.5, life: 1.1, shape: 1 });
+      audio.play("crash");
+      if (fsm.can("CRASHED")) fsm.set("CRASHED");
+      log(`還原：已崩盤 ${mult.toFixed(2)}x`, "warn");
+    } else {
+      const el = Math.max(0, (Date.now() - r.startTs) / 1000);
+      cashed = false;
+      if (opts.fresh) {
+        t = 0; mult = 1; pn = 0; countdown = 1.6;
+        if (fsm.can("COUNTDOWN")) fsm.set("COUNTDOWN");
+      } else {
+        t = el; mult = Math.pow(2, t / 2.2); rebuildCurve(t);
+        if (fsm.can("RUNNING")) fsm.set("RUNNING");
+        log(`還原：飛行中 ${mult.toFixed(2)}x，無縫接回`, "ok");
+      }
+    }
+    $("fair").textContent = "Hash：" + r.hash.slice(0, 28) + "…　Seed（揭露）：" + r.seed.slice(0, 28) + "…";
+    sync();
+  }
+  async function startBet() {
+    if (!fsm.is("IDLE")) return;
+    fsm.set("BETTING"); sync();
+    try { const r = await rgs.play(bet); applyRound(r, { fresh: r.status === "RUNNING" }); }
+    catch (e) { log(`重連耗盡：${e.message}，保留 roundId 聯絡客服`, "err"); if (fsm.can("IDLE")) fsm.set("IDLE"); }
+  }
+  async function doCashout() {
+    if (!fsm.is("RUNNING") || cashed || cashPending) return;
+    cashPending = true; $("cashBtn").disabled = true;
+    const m = mult;
+    try {
+      const r = await rgs.cashout(round.roundId, m); applyRound(r);
+      audio.play("cash"); particles.burst(stage.w * .5, stage.h * .35, 50, { colors: ["#ffe06a", "#5ee0ff"], power: 1.1, life: .8, shape: 1 }); shake = 6;
+    } catch (e) { log(`兌現失敗：${e.message}`, "err"); if (fsm.can("IDLE")) fsm.set("IDLE"); }
+    finally { cashPending = false; }
+  }
+
+  function update(dt) {
+    now += dt;
+    if (shake > 0) shake = Math.max(0, shake - dt * 26);
+    particles.update(dt);
+    if (fsm.is("COUNTDOWN")) {
+      countdown -= dt;
+      if (countdown <= 0) { t = 0; mult = 1; pn = 0; fsm.set("RUNNING"); audio.play("tick"); }
+    } else if (fsm.is("RUNNING")) {
+      t += dt; mult = Math.pow(2, t / 2.2);
+      if (pn < MAXP) { px[pn] = 60 + (t / 12) * (stage.w - 80); py[pn] = curveY(mult); pn++; }
+      if (t >= round.crashTime && !crashPending) {
+        crashPending = true; mult = round.crashMul;
+        rgs.resume(round.roundId).then(r => applyRound(r)).catch(() => { round.status = "CRASHED"; round.payout = 0; applyRound(round); });
+      }
+    } else if (fsm.is("CRASHED")) {
+      if (now - crashAt > 1.6) { fsm.set("IDLE"); mult = 1; sync(); }
+    } else if (fsm.is("SETTLE")) {
+      fsm.set("IDLE"); mult = 1; sync();
+    }
+  }
+
+  function render() {
+    const c = stage.begin(), W = stage.w, H = stage.h;
+    const bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#0d1729"); bg.addColorStop(1, "#050912");
+    c.fillStyle = bg; c.fillRect(0, 0, W, H); c.save();
+    if (shake > 0) c.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    c.strokeStyle = "rgba(120,180,220,.12)"; c.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) { const y = H * .86 - i * (H * .72 / 8); c.beginPath(); c.moveTo(50, y); c.lineTo(W - 16, y); c.stroke();
+      c.fillStyle = "rgba(255,255,255,.35)"; c.font = "11px sans-serif"; c.textAlign = "left"; c.fillText(Math.pow(2, i).toFixed(i < 3 ? 1 : 0) + "x", 6, y + 4); }
+    for (let i = 0; i <= 12; i += 2) { const x = 60 + (i / 12) * (W - 80); c.beginPath(); c.moveTo(x, H * .1); c.lineTo(x, H * .94); c.stroke(); }
+    if (pn > 1) {
+      c.beginPath(); c.moveTo(px[0], py[0]); for (let i = 1; i < pn; i++) c.lineTo(px[i], py[i]);
+      c.strokeStyle = cashed ? "#ffe06a" : (fsm.is("CRASHED") ? "#ff5b6e" : "#5ee0ff");
+      c.lineWidth = 3; c.shadowColor = c.strokeStyle; c.shadowBlur = 18; c.stroke(); c.shadowBlur = 0;
+      const hx = px[pn - 1], hy = py[pn - 1];
+      c.save(); c.translate(hx, hy); c.rotate(-.5);
+      c.fillStyle = cashed ? "#ffe06a" : "#5ee0ff"; c.shadowColor = c.fillStyle; c.shadowBlur = 20;
+      c.beginPath(); c.moveTo(16, 0); c.lineTo(-12, -9); c.lineTo(-7, 0); c.lineTo(-12, 9); c.closePath(); c.fill(); c.shadowBlur = 0; c.restore();
+    }
+    particles.draw();
+    c.textAlign = "center"; c.textBaseline = "middle";
+    if (fsm.is("IDLE")) { c.fillStyle = "rgba(255,255,255,.5)"; c.font = "bold 22px sans-serif"; c.fillText("下注後飛行，崩盤前兌現", W / 2, H * .45); }
+    else if (fsm.is("COUNTDOWN")) { c.fillStyle = "#ffe06a"; c.font = "bold 60px sans-serif"; c.fillText(Math.ceil(countdown), W / 2, H * .42); }
+    else if (fsm.is("RUNNING")) {
+      c.fillStyle = cashed ? "#ffe06a" : "#5ee0ff"; c.font = "bold 50px sans-serif";
+      c.shadowColor = c.fillStyle; c.shadowBlur = 20; c.fillText(mult.toFixed(2) + "x", W / 2, H * .35); c.shadowBlur = 0;
+      c.font = "13px sans-serif"; c.fillStyle = "#fff";
+      c.fillText(cashPending ? "送出兌現請求…" : (cashed ? "已兌現" : "崩盤點未知…"), W / 2, H * .45);
+    } else if (fsm.is("CRASHED")) {
+      c.fillStyle = "#ff5b6e"; c.font = "bold 46px sans-serif"; c.shadowColor = "#ff5b6e"; c.shadowBlur = 24;
+      c.fillText("CRASH " + round.crashMul.toFixed(2) + "x", W / 2, H * .38); c.shadowBlur = 0;
+      c.font = "16px sans-serif"; c.fillStyle = "#fff"; c.fillText(cashed ? "已兌現 " + payout.toFixed(2) + " ✓" : "未兌現，損失注額", W / 2, H * .48);
+    } else if (fsm.is("SETTLE")) { c.fillStyle = "#ffe06a"; c.font = "bold 38px sans-serif"; c.fillText("CASH OUT +" + payout.toFixed(2), W / 2, H * .38); }
+    c.restore();
+  }
+
+  const loop = new GameLoop({ update, render });
+  $("betBtn").onclick = startBet; $("cashBtn").onclick = doCashout;
+  $("betDown").onclick = () => { if (fsm.is("IDLE")) { bet = Math.max(1, bet - 1); sync(); } };
+  $("betUp").onclick = () => { if (fsm.is("IDLE")) { bet = Math.min(500, bet + 1); sync(); } };
+  sync(); log("就緒。勾選「模擬斷線」後兌現，可觀察重連。", "info");
+  Promise.resolve(rgs.bootstrap()).then(r => { if (r) applyRound(r); }).catch(() => {});
+  loop.start();
+})();
+</script>
+</body>
+</html>
