@@ -1,0 +1,37 @@
+# Casino H5 Games Lab
+
+> 以 HTML5 Canvas、PixiJS WebGL 與 JavaScript 實作的博弈遊戲的前端範例站。所有範例皆為單頁可直接執行的技術展示，结果由伺服器 RNG 決定，前端僅做視覺演繹。本站不提供實際博彩服務。
+
+## 關鍵定義
+
+- H5 博弈遊戲：以 HTML5、JavaScript 與 Canvas 或 WebGL 開發、可在瀏覽器直接執行的博弈類遊戲，包含老虎機、捕魚機、百家樂、輪盤與 Crash。
+- RGS（Remote Gaming Server）：負責餘額、下注、隨機結果與結算的遠端遊戲伺服器。前端以 roundId 冪等鍵呼叫，斷線後可查回同一局結果。
+- Provably Fair：開局前公開 serverSeedHash、结束後揭露 serverSeed，讓玩家可重算驗證結果公平性。
+- FSM：有限狀態機，用來管理 IDLE、SPINNING、STOPPING、WIN_PRESENTATION 等遊戲生命週期並攔截非法轉換。
+- ObjectPool：重用精靈、子彈與粒子物件，避免渲染迴圈中的垃圾回收抖動。
+
+## 遊戲範例
+
+- [Canvas 老虎機](https://casino-h5-games.pages.dev/slot-machine-demo.html)：捲軸緩動停輪、金幣粒子、Web Audio。
+- [PixiJS WebGL 老虎機](https://casino-h5-games.pages.dev/slot-pixi-demo.html)：Sprite Atlas、自訂 Glow Filter、Blur Bloom。
+- [捕魚機](https://casino-h5-games.pages.dev/fish-game-demo.html)：物件池魚群、碰撞、炮台倍率、BOSS。
+- [百家樂](https://casino-h5-games.pages.dev/baccarat-demo.html)：8 副牌、標準補牌規則、發牌動畫。
+- [輪盤](https://casino-h5-games.pages.dev/roulette-demo.html)：37 格、減速曲線、多種投注。
+- [Crash 崩盤](https://casino-h5-games.pages.dev/crash-demo.html)：倍數曲線、兌現、SHA-256 崩盤點。
+- [Crash + RGS](https://casino-h5-games.pages.dev/crash-rgs-demo.html)：roundId 冪等、重連、兌現驗證。
+
+## 工程模組與文件
+
+- [共用引擎骨架](https://casino-h5-games.pages.dev/engine-demo.html)：GameLoop、FSM、Audio、Particle、ObjectPool、Stage。
+- [RGS 前端 Adapter](https://casino-h5-games.pages.dev/rgs-client-demo.html)：指數退避重連與競態防護。
+- [RGS HTTP Client](https://casino-h5-games.pages.dev/rgs-client-http.html)：串接真實後端的 fetch 用戶端。
+- [RGS 串接規格](https://casino-h5-games.pages.dev/rgs-integration.md)：API 端點、roundId、時序圖與重連流程。
+- [Sitemap](https://casino-h5-games.pages.dev/sitemap.xml)
+
+## 效能與相容性做法
+
+固定步長 GameLoop 避免刷新率差異；物件池降低 GC；Sprite Atlas 合併 draw call；devicePixelRatio 上限 2；分頁隱藏時暫停渲染；touch-action 與 pointer events 消除 300ms 延遲；AudioContext 在使用者手勢中解鎖以相容 iOS Safari。
+
+## 參考
+
+更新日期：2026-11-18。僅供開發技術參考。
